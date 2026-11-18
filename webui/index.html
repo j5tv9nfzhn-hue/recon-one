@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="auto" data-preset="tangerine">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>recon-one · 侦察控制台</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+
+<!-- ══════════════════════════ 配对 / 登录 ══════════════════════════ -->
+<section id="gate" class="gate" hidden>
+  <div class="gate__glow" aria-hidden="true"></div>
+  <div class="gate__card">
+    <header class="gate__head">
+      <div class="gate__label" id="gateLabel">首次运行</div>
+      <h1 class="gate__title">recon-one</h1>
+      <p class="gate__sub" id="gateSub">用控制台里的一次性令牌完成配对</p>
+    </header>
+
+    <form class="form" id="pairForm" hidden>
+      <label class="field">
+        <span class="field__label">一次性令牌</span>
+        <input class="input mono" id="pairToken" autocomplete="off" spellcheck="false"
+               placeholder="TKN-0000-0000-0000" required>
+      </label>
+      <label class="field">
+        <span class="field__label">设置密码（仅此一次）</span>
+        <input class="input" id="pairPass" type="password" autocomplete="new-password"
+               placeholder="至少 10 位，字母与数字混用" required>
+      </label>
+      <label class="field">
+        <span class="field__label">重复密码</span>
+        <input class="input" id="pairPass2" type="password" autocomplete="new-password" required>
+      </label>
+      <p class="form__error" id="pairErr" role="alert" hidden></p>
+      <button class="btn btn--primary btn--block" type="submit">设置密码并进入</button>
+      <p class="form__hint">设置完成后本浏览器将保持登录，下次打开无需再输入密码。</p>
+    </form>
+
+    <form class="form" id="loginForm" hidden>
+      <label class="field">
+        <span class="field__label">密码</span>
+        <input class="input" id="loginPass" type="password" autocomplete="current-password"
+               required autofocus>
+      </label>
+      <p class="form__error" id="loginErr" role="alert" hidden></p>
+      <button class="btn btn--primary btn--block" type="submit">进入控制台</button>
+      <p class="form__hint" id="rememberHint">登录后本浏览器将保持登录。</p>
+    </form>
+
+    <p class="gate__foot">
+      凭据仅保存在本运行目录 <span class="mono">state/auth.json</span>，
+      以 PBKDF2-HMAC-SHA256（240 000 轮、随机盐）存储。
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════ 控制台 ══════════════════════════ -->
+<div id="app" class="app" hidden>
+
+  <!-- ── 侧边栏 ── -->
+  <aside class="side" id="side">
+    <div class="side__head">
+      <span class="side__mark" aria-hidden="true"></span>
+      <span class="side__name">recon-one</span>
+      <button class="side__collapse" id="sideToggle" type="button"
+              aria-label="收起侧边栏" title="收起侧边栏">
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+          <path d="M9 3L4 7l5 4" stroke="currentColor" stroke-width="1.4"
+                fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+
+    <nav class="side__nav" aria-label="主导航">
+      <button class="navitem" data-view="scan" type="button" title="扫描">
+        <span class="navitem__ico" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <circle cx="7" cy="7" r="4.6" stroke="currentColor" stroke-width="1.3"/>
+            <path d="M10.6 10.6L14 14" stroke="currentColor" stroke-width="1.3"
+                  stroke-linecap="round"/>
+          </svg>
+        </span>
+        <span class="navitem__text">扫描</span>
+      </button>
+      <button class="navitem" data-view="runs" type="button" title="产物">
+        <span class="navitem__ico" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path d="M2 5.2c0-.9 2.7-1.6 6-1.6s6 .7 6 1.6-2.7 1.6-6 1.6-6-.7-6-1.6Z"
+                  stroke="currentColor" stroke-width="1.3"/>
+            <path d="M2 5.2v5.6c0 .9 2.7 1.6 6 1.6s6-.7 6-1.6V5.2" stroke="currentColor"
+                  stroke-width="1.3"/>
+          </svg>
+        </span>
+        <span class="navitem__text">产物</span>
+        <span class="navitem__badge" id="badgeRuns"></span>
+      </button>
+      <button class="navitem" data-view="overview" type="button" title="概览">
+        <span class="navitem__ico" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <rect x="2" y="2" width="5" height="5" stroke="currentColor" stroke-width="1.3"/>
+            <rect x="9" y="2" width="5" height="5" stroke="currentColor" stroke-width="1.3"/>
+            <rect x="2" y="9" width="5" height="5" stroke="currentColor" stroke-width="1.3"/>
+            <rect x="9" y="9" width="5" height="5" stroke="currentColor" stroke-width="1.3"/>
+          </svg>
+        </span>
+        <span class="navitem__text">概览</span>
+      </button>
+      <button class="navitem" data-view="compare" type="button" title="对比">
+        <span class="navitem__ico" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <rect x="2" y="6" width="4.2" height="8" stroke="currentColor" stroke-width="1.3"/>
+            <rect x="9.8" y="2" width="4.2" height="12" stroke="currentColor" stroke-width="1.3"/>
+          </svg>
+        </span>
+        <span class="navitem__text">对比</span>
+      </button>
+      <button class="navitem" data-view="checks" type="button" title="评分明细">
+        <span class="navitem__ico" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path d="M2 4h12M2 8h12M2 12h8" stroke="currentColor" stroke-width="1.3"
+                  stroke-linecap="round"/>
+          </svg>
+        </span>
+        <span class="navitem__text">评分明细</span>
+        <span class="navitem__badge" id="badgeChecks"></span>
+      </button>
+      <button class="navitem" data-view="endpoints" type="button" title="端点">
+        <span class="navitem__ico" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path d="M4 5l-2.5 3L4 11M12 5l2.5 3L12 11" stroke="currentColor"
+                  stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M9 3L7 13" stroke="currentColor" stroke-width="1.3"
+                  stroke-linecap="round"/>
+          </svg>
+        </span>
+        <span class="navitem__text">端点</span>
+        <span class="navitem__badge" id="badgeEps"></span>
+      </button>
+      <button class="navitem" data-view="params" type="button" title="参数与请求体">
+        <span class="navitem__ico" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path d="M6 2v3.2c0 .5-.2 1-.6 1.4L3 9l2.4 2.4c.4.4.6.9.6 1.4V16"
+                  stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+            <path d="M10 2v3.2c0 .5.2 1 .6 1.4L13 9l-2.4 2.4c-.4.4-.6.9-.6 1.4V16"
+                  stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+          </svg>
+        </span>
+        <span class="navitem__text">参数与请求体</span>
+        <span class="navitem__badge" id="badgeParams"></span>
+      </button>
+      <button class="navitem" data-view="log" type="button" title="运行日志">
+        <span class="navitem__ico" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <rect x="2" y="3" width="12" height="10" rx="1" stroke="currentColor"
+                  stroke-width="1.3"/>
+            <path d="M5 7l2 1.5L5 10M9 10h2" stroke="currentColor" stroke-width="1.3"
+                  stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </span>
+        <span class="navitem__text">运行日志</span>
+      </button>
+    </nav>
+
+    <div class="side__spacer"></div>
+
+    <div class="side__run" id="sideRun" hidden>
+      <div class="side__runlabel">当前产物</div>
+      <div class="side__runname mono" id="currentRun">—</div>
+    </div>
+
+    <div class="side__meta">
+      <div class="side__row"><span>目标</span><span class="mono" id="sideTarget">—</span></div>
+      <div class="side__row"><span>状态</span><span class="top__state" id="connStatus"
+        data-state="idle">空闲</span></div>
+      <div class="side__row"><span>版本</span><span class="mono" id="ver"></span></div>
+    </div>
+
+    <div class="side__foot">
+      <div class="presets" role="group" aria-label="配色预设">
+        <button class="preset" data-preset="tangerine" type="button" title="Tangerine">
+          <i class="sw sw--tangerine"></i><span>Tangerine</span>
+        </button>
+        <button class="preset" data-preset="soft-pop" type="button" title="Soft Pop">
+          <i class="sw sw--soft-pop"></i><span>Soft Pop</span>
+        </button>
+        <button class="preset" data-preset="brutalist" type="button" title="Brutalist">
+          <i class="sw sw--brutalist"></i><span>Brutalist</span>
+        </button>
+        <i class="preset__radius" id="presetRadius"></i>
+      </div>
+      <div class="side__actions">
+        <button class="linkbtn" id="themeBtn" type="button">跟随系统</button>
+        <button class="linkbtn" id="logoutBtn" type="button">退出</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── 主区 ── -->
+  <main class="main" id="main">
+
+    <!-- 顶部工具条 -->
+    <header class="bar">
+      <div class="bar__left">
+        <button class="bar__burger" id="burger" type="button" aria-label="展开侧边栏">
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.4"
+                  stroke-linecap="round"/>
+          </svg>
+        </button>
+        <div class="bar__crumb">
+          <span class="bar__eyebrow">recon-one</span>
+          <h1 class="bar__title" id="viewTitle">扫描</h1>
+        </div>
+      </div>
+      <div class="bar__right">
+        <div class="live" id="liveBar" data-state="idle">
+          <span class="live__dot" aria-hidden="true"></span>
+          <span class="live__text" id="liveText">空闲</span>
+        </div>
+        <div class="progress" id="progress" hidden>
+          <div class="progress__meta">
+            <span class="mono" id="progressPct">0%</span>
+            <span class="progress__stage" id="progressStage"></span>
+          </div>
+          <div class="progress__track"><i id="progressFill"></i></div>
+        </div>
+      </div>
+    </header>
+
+    <div class="content" id="content">
+
+      <!-- ───────── 视图：扫描 ───────── -->
+      <section class="view" data-view="scan">
+        <div class="card card--tight">
+          <div class="card__head">
+            <h2 class="card__title">目标</h2>
+            <span class="tag tag--ghost" id="parHint">每行一个，或用逗号分隔</span>
+          </div>
+          <p class="card__note">
+            只填已获授权的域名。扫描全部为被动读取，不发起任何利用尝试。
+            多个目标会并行探测（站点级并发，站点内部另有请求级并发）。
+          </p>
+
+          <label class="field">
+            <span class="field__label">域名（最多 12 个，并行上限由服务端控制）</span>
+            <textarea class="input input--area mono" id="targets" rows="3" spellcheck="false"
+                      autocomplete="off" placeholder="example.com&#10;example.org&#10;app.example.net"></textarea>
+          </label>
+
+          <div class="controls">
+            <label class="field field--narrow">
+              <span class="field__label">档案</span>
+              <select class="select" id="profile">
+                <option value="fast">fast · 8 页 / 90 秒</option>
+                <option value="default" selected>default · 40 页 / 300 秒</option>
+                <option value="deep">deep · 150 页 / 900 秒</option>
+              </select>
+            </label>
+            <div class="switches">
+              <label class="check"><input type="checkbox" id="swTls" checked><span>校验 TLS</span></label>
+              <label class="check"><input type="checkbox" id="swDns" checked><span>DNS 记录</span></label>
+              <label class="check"><input type="checkbox" id="swGql" checked><span>GraphQL</span></label>
+              <label class="check"><input type="checkbox" id="swExt"><span>域外请求</span></label>
+            </div>
+            <div class="switches">
+              <label class="check"><input type="checkbox" id="swJs" checked><span>下载前端 bundle</span></label>
+              <label class="check"><input type="checkbox" id="swIntel" checked><span>被动情报（CT / 存档）</span></label>
+              <label class="check"><input type="checkbox" id="swGeo"><span>地理位置</span></label>
+              <label class="check"><input type="checkbox" id="swCve"><span>CVE 线索</span></label>
+            </div>
+          </div>
+
+          <p class="note note--warn" id="extHint" hidden>
+            关闭作用域守卫后，扫描会请求第三方主机并污染端点清单。仅在授权范围明确覆盖时才开启。
+          </p>
+
+          <div class="card__actions">
+            <button class="btn btn--primary" id="runBtn" type="button">开始扫描</button>
+            <button class="btn" id="stopBtn" type="button" disabled>停止</button>
+            <span class="actions__meta mono" id="runMeta"></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card__head">
+            <h2 class="card__title">目标进度</h2>
+            <span class="tag tag--ghost" id="parallelHint"></span>
+          </div>
+          <ul class="targets" id="targetList">
+            <li class="targets__empty">还没有运行中的批次。</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <div class="card__head">
+            <h2 class="card__title">实时输出</h2>
+            <span class="tag tag--ghost" id="liveCount"></span>
+          </div>
+          <pre class="log log--live" id="liveLog">尚未开始扫描。</pre>
+        </div>
+      </section>
+
+      <!-- ───────── 视图：产物 ───────── -->
+      <section class="view" data-view="runs" hidden>
+        <div class="card card--tight">
+          <div class="card__head">
+            <h2 class="card__title">产物管理</h2>
+            <div class="card__tools">
+              <span class="tag tag--ghost" id="runsMeta"></span>
+              <button class="btn btn--sm" id="runsRefresh" type="button">刷新</button>
+            </div>
+          </div>
+          <p class="card__note">
+            每次扫描产出 <span class="mono">runs/&lt;目标&gt;/</span> 一整套报告包。
+            这里可以切换当前查看的产物，或删除不再需要的目录（删除会连同
+            <span class="mono">raw/</span> 原始 bundle 一起移除，不可恢复）。
+          </p>
+          <div class="tablewrap">
+            <table class="table table--runs">
+              <thead>
+                <tr>
+                  <th>产物目录</th>
+                  <th>目标</th>
+                  <th class="col-s">生成时间</th>
+                  <th class="al-r col-n">端点</th>
+                  <th class="al-r col-n">发现</th>
+                  <th class="col-s">结论</th>
+                  <th class="al-r col-w">大小</th>
+                  <th class="al-r col-act">操作</th>
+                </tr>
+              </thead>
+              <tbody id="runsBody"></tbody>
+            </table>
+          </div>
+          <p class="empty-state" id="runsEmpty" hidden>还没有任何产物。先到「扫描」页跑一次。</p>
+        </div>
+      </section>
+
+      <!-- ───────── 视图：概览 ───────── -->
+      <section class="view" data-view="overview" hidden>
+        <div class="needs" data-needs-report>
+          <div class="needs__card">
+            <h2 class="needs__title">还没有可显示的概览</h2>
+            <p class="needs__text">先跑一次扫描，或在「产物」页选一份历史报告。</p>
+            <button class="btn btn--primary btn--sm" data-goto="scan" type="button">去扫描</button>
+          </div>
+        </div>
+
+        <div class="stack" data-has-report hidden>
+          <div class="verdict">
+            <div class="verdict__row">
+              <h2 class="verdict__label" id="verdictLabel">—</h2>
+              <p class="verdict__why" id="verdictWhy"></p>
+            </div>
+            <ul class="verdict__acts" id="verdictActs"></ul>
+          </div>
+
+          <div class="metrics">
+            <div class="metric">
+              <div class="metric__label">维护水平</div>
+              <div class="metric__value">
+                <span class="num" id="hyScore">—</span>
+                <span class="metric__grade mono" id="hyGrade"></span>
+              </div>
+              <div class="metric__bar"><i id="hyBar"></i></div>
+              <div class="metric__note" id="hyMeta"></div>
+            </div>
+            <div class="metric">
+              <div class="metric__label">可评估机会</div>
+              <div class="metric__value">
+                <span class="num" id="opScore">—</span>
+                <span class="metric__grade mono" id="opGrade"></span>
+              </div>
+              <div class="metric__bar"><i id="opBar"></i></div>
+              <div class="metric__note" id="opMeta"></div>
+            </div>
+            <div class="metric metric--wide">
+              <div class="metric__label">本次观测</div>
+              <div class="counts" id="counts"></div>
+            </div>
+          </div>
+
+          <div class="card card--plain">
+            <h2 class="card__title">评分不覆盖什么</h2>
+            <p class="scope__text" id="blind"></p>
+          </div>
+
+          <div class="card card--profile">
+            <div class="card__head">
+              <h2 class="card__title">目标画像</h2>
+              <span class="tag tag--ghost" id="profileMode"></span>
+            </div>
+            <div class="profile">
+              <div class="profile__gauge">
+                <div class="profile__label">价值 · 是否值得测</div>
+                <div class="profile__score num" id="worthScore">—</div>
+                <div class="profile__bar"><i id="worthBar"></i></div>
+                <div class="profile__meta" id="worthMeta"></div>
+              </div>
+              <div class="profile__gauge">
+                <div class="profile__label">难度 · 是否容易打</div>
+                <div class="profile__score num" id="hardScore">—</div>
+                <div class="profile__bar"><i id="hardBar"></i></div>
+                <div class="profile__meta" id="hardMeta"></div>
+              </div>
+              <div class="profile__gauge">
+                <div class="profile__label">机会窗口（非概率）</div>
+                <div class="profile__score num" id="succIndex">—</div>
+                <div class="profile__band" id="succBand"></div>
+              </div>
+            </div>
+
+            <div class="radar" id="radarBox" role="img" aria-label="三轴画像：尚无可显示的数据">
+              <div class="radar__fig" id="radarFig"></div>
+              <div class="radar__legend" id="radarLegend"></div>
+            </div>
+            <dl class="profile__dims" id="profileDims"></dl>
+            <p class="profile__note" id="profileNote"></p>
+          </div>
+
+          <div class="card">
+            <div class="card__head">
+              <h2 class="card__title">端点风险分布</h2>
+              <span class="tag tag--ghost" id="epMixMeta"></span>
+            </div>
+            <p class="card__note">
+              按端点 <span class="mono">priority</span> 分档：首要 / 次要 / 清单。占比为占全部端点的比例。
+            </p>
+            <div class="donut" id="epMix">
+              <div class="donut__fig" id="epMixFig"></div>
+              <div class="donut__legend" id="epMixLegend"></div>
+            </div>
+            <p class="vis__empty" id="epMixEmpty" hidden>无端点（未探测或页面无链接）</p>
+          </div>
+
+          <div class="card">
+            <div class="card__head">
+              <h2 class="card__title">情报落地</h2>
+              <span class="tag tag--ghost" id="intelMeta"></span>
+            </div>
+            <div class="intel">
+              <div class="intel__block">
+                <div class="intel__label">子域（被动发现）</div>
+                <ul class="intel__subs" id="intelSubs"></ul>
+              </div>
+              <div class="intel__block">
+                <div class="intel__label">主动探测强度</div>
+                <div class="intel__stats" id="intelStats"></div>
+                <div class="intel__share">
+                  <span class="intel__sharetext" id="intelShare"></span>
+                  <span class="intel__bar"><i id="intelShareBar"></i></span>
+                </div>
+              </div>
+            </div>
+            <p class="intel__deps mono" id="intelDeps"></p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ───────── 视图：对比 ───────── -->
+      <section class="view" data-view="compare" hidden>
+        <div class="card card--tight">
+          <div class="card__head">
+            <h2 class="card__title">横向对比</h2>
+            <div class="card__tools">
+              <span class="tag tag--ghost" id="compareCount"></span>
+              <button class="btn btn--sm" id="compareRefresh" type="button">刷新</button>
+            </div>
+          </div>
+          <p class="card__note" id="compareNote">
+            列均按当前评分模型重算。<span class="mono">index</span> 为机会指数（非概率）。
+          </p>
+          <p class="note note--warn" id="compareErr" role="alert" hidden></p>
+          <p class="empty-state" id="compareLoading" hidden>正在读取产物…</p>
+          <div class="tablewrap" id="compareWrap" hidden>
+            <table class="table table--compare">
+              <thead>
+                <tr>
+                  <th>目标</th>
+                  <th class="col-time">生成时间</th>
+                  <th class="col-verdict">结论</th>
+                  <th class="al-r col-w">价值</th>
+                  <th class="al-r col-w">易度</th>
+                  <th class="al-r col-idx">机会指数</th>
+                  <th class="al-r col-n">子域</th>
+                  <th class="al-r col-n">端点</th>
+                  <th class="al-r col-n">发现</th>
+                  <th class="al-r col-w">主动占比</th>
+                  <th class="al-r col-act">操作</th>
+                </tr>
+              </thead>
+              <tbody id="compareBody"></tbody>
+            </table>
+          </div>
+          <div class="needs" id="compareEmpty" hidden>
+            <div class="needs__card">
+              <h2 class="needs__title">还没有可对比的产物</h2>
+              <p class="needs__text">对比只在已有报告的产物之间进行。先扫描一个目标。</p>
+              <button class="btn btn--primary btn--sm" data-goto="scan" type="button">去扫描</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ───────── 视图：评分明细 ───────── -->
+      <section class="view" data-view="checks" hidden>
+        <div class="needs" data-needs-report>
+          <div class="needs__card">
+            <h2 class="needs__title">还没有评分明细</h2>
+            <p class="needs__text">评分是报告的一部分，先跑一次扫描。</p>
+            <button class="btn btn--primary btn--sm" data-goto="scan" type="button">去扫描</button>
+          </div>
+        </div>
+        <div class="stack" data-has-report hidden>
+          <p class="view__note">按未通过优先排序。权重与得分均可复核，来源见每行「依据」。<span id="checksCount"></span></p>
+          <div class="tablewrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th class="col-s">判定</th>
+                  <th class="col-s">轴</th>
+                  <th>检查项</th>
+                  <th>依据</th>
+                  <th class="al-r col-w">权重</th>
+                  <th class="al-r col-w">得分</th>
+                </tr>
+              </thead>
+              <tbody id="checksBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ───────── 视图：端点 ───────── -->
+      <section class="view" data-view="endpoints" hidden>
+        <div class="needs" data-needs-report>
+          <div class="needs__card">
+            <h2 class="needs__title">还没有端点清单</h2>
+            <p class="needs__text">端点来自前端 JS 与 API 规范，先跑一次扫描。</p>
+            <button class="btn btn--primary btn--sm" data-goto="scan" type="button">去扫描</button>
+          </div>
+        </div>
+        <div class="stack" data-has-report hidden>
+          <p class="view__note" id="epCount"></p>
+          <div class="tablewrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th class="al-r col-n">#</th>
+                  <th class="col-s">方法</th>
+                  <th>路径</th>
+                  <th class="col-s">置信</th>
+                  <th>参数</th>
+                </tr>
+              </thead>
+              <tbody id="epsBody"></tbody>
+            </table>
+          </div>
+          <button class="more" id="epMore" type="button" hidden>展开全部</button>
+        </div>
+      </section>
+
+      <!-- ───────── 视图：参数 ───────── -->
+      <section class="view" data-view="params" hidden>
+        <div class="needs" data-needs-report>
+          <div class="needs__card">
+            <h2 class="needs__title">还没有参数数据</h2>
+            <p class="needs__text">参数与请求体字段来自 bundle 静态分析，先跑一次扫描。</p>
+            <button class="btn btn--primary btn--sm" data-goto="scan" type="button">去扫描</button>
+          </div>
+        </div>
+        <div class="stack" data-has-report hidden>
+          <div class="card card--plain">
+            <h2 class="card__title">请求体字段</h2>
+            <p class="card__note">
+              从脚本 <span class="mono">body:</span> 字面量与
+              <span class="mono">FormData.append</span> 提取。写端点的可测性主要来自这里。
+            </p>
+            <div class="tablewrap tablewrap--narrow">
+              <table class="table">
+                <thead><tr><th>字段</th><th class="col-s">位置</th><th>来源</th></tr></thead>
+                <tbody id="bodyBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card card--plain">
+            <h2 class="card__title">全部参数 <span class="card__count" id="paramCount"></span></h2>
+            <div class="tablewrap tablewrap--narrow">
+              <table class="table">
+                <thead><tr><th>名称</th><th class="col-s">位置</th>
+                  <th class="al-r col-n">端点</th></tr></thead>
+                <tbody id="paramBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ───────── 视图：日志 ───────── -->
+      <section class="view" data-view="log" hidden>
+        <p class="view__note">本次运行的完整阶段事件，含耗时与覆盖率信息。</p>
+        <pre class="log" id="logBox"></pre>
+      </section>
+
+      <p class="empty-state" id="emptyState" hidden>
+        还没有结果。先到「扫描」页填写域名并开始。
+      </p>
+    </div>
+  </main>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>

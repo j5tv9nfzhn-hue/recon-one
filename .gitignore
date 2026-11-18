@@ -1,0 +1,17 @@
+# 运行时状态：凭据与会话哈希，绝不入库
+state/
+
+# 扫描产物：含第三方目标的侦察数据（端点、密钥原文、报告）
+runs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 本地临时文件与日志
+Temp/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

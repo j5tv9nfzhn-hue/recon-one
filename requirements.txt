@@ -1,0 +1,14 @@
+# recon-one 运行时依赖 —— 必需
+#
+# 安装： python -m pip install -r requirements.txt
+#
+# 两个包都是硬依赖（`reconone/concurrency.py` 直接 import，缺失时启动即报错并给出安装命令）：
+#   * httpx —— 并发抓取的 HTTP 客户端（连接池 + 统一超时 + 同步/异步双模式）
+#   * anyio —— TaskGroup / CapacityLimiter，保证并发任务不泄漏、不越权
+#
+# 变更记录（2026-11）：
+#   - 由「可选加速层」升级为必需依赖，命令行与控制台都要求先安装。
+#   - lxml 从未被任何代码 import，已移除。
+
+httpx>=0.27,<1
+anyio>=4.0,<5

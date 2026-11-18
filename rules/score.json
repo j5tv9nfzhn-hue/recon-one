@@ -1,0 +1,36 @@
+{
+  "version": "1.0",
+  "method_note": "证据门控加权评分：仅对已观测到的值计分；未采集项记为 unknown，既不通过也不计入分母。维护水平(hygiene) 与 可评估机会(opportunity) 分轴独立，永不相加。",
+  "source": "Mozilla HTTP Observatory scoring modifiers (mozilla/http-observatory, httpobs/docs/scoring.md, 2024-02) + RFC 7208 (SPF) + RFC 7489 (DMARC) + RFC 8996 (TLS 1.0/1.1 弃用)",
+  "disclaimer": "本评分只描述本次观测到的配置，不构成漏洞结论。'可评估机会'高表示评估成本低，不代表站点存在漏洞；'维护水平'低表示配置薄弱，不代表可利用。分值不可跨目标直接比较，除非两次运行的 coverage_pct 相同。",
+
+  "grade_chart": [[90, "A"], [80, "B"], [70, "C"], [60, "D"], [0, "F"]],
+
+  "weights": {
+    "hygiene": {
+      "headers": 40,
+      "per_header": {
+        "content-security-policy": 12,
+        "strict-transport-security": 8,
+        "x-frame-options": 5,
+        "x-content-type-options": 4,
+        "referrer-policy": 4,
+        "permissions-policy": 3,
+        "cross-origin-opener-policy": 4
+      },
+      "default_header": 3,
+      "cookie": 4,
+      "tls": 6,
+      "dns": 4
+    },
+    "opportunity": {
+      "sourcemap": 10,
+      "secrets": 12,
+      "api_spec": 8,
+      "graphql": 8,
+      "internal_host": 8,
+      "parameters": 10,
+      "freshness": 6
+    }
+  }
+}
