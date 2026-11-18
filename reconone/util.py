@@ -59,6 +59,135 @@ def redact(secret: str) -> dict:
     }
 
 
+# Response headers whose value is a credential, a session or a person. The *name* stays in
+# the report (its presence is a finding); the value must never leave the process.
+SENSITIVE_HEADERS = (
+    "set-cookie", "cookie", "authorization", "proxy-authorization",
+    "x-api-key", "api-key", "x-auth-token", "x-access-token",
+    "x-csrf-token", "x-xsrf-token", "x-session-id", "x-amz-security-token",
+    "x-goog-api-key", "authentication-info", "www-authenticate",
+)
+
+# Query parameters whose value is a credential rather than a filter. Kept narrow on purpose:
+# `id`, `page`, `q` are not secrets, and masking them would destroy the endpoint map.
+SENSITIVE_PARAMS = (
+    "token", "access_token", "id_token", "refresh_token", "api_key", "apikey",
+    "key", "secret", "client_secret", "password", "passwd", "pwd", "sig",
+    "signature", "auth", "session", "sessionid", "sid", "ticket", "jwt",
+    "bearer", "credential", "sas", "code",
+)
+
+# Cookie attributes carry the analysis (HttpOnly / Secure / SameSite / lifetime). Only the
+# value half of `name=value` is a secret, so the attributes survive redaction.
+_COOKIE_ATTRS = ("expires", "max-age", "path", "domain", "secure", "httponly",
+                 "samesite", "priority", "partitioned")
+
+
+def redacted_marker(value: str) -> str:
+    """A self-describing placeholder: no character of the original, but still checkable.
+
+    `masked` in `redact()` keeps the first and last characters because a human needs to
+    recognise the key they pasted. A session cookie has no such need: keeping any of it
+    would let the value be confirmed by a third party. Length plus hash is enough to prove
+    "this is the same value I saw" without enabling reuse.
+    """
+    return f"[redacted:{sha256_text(value)[:12]}:len={len(value)}]"
+
+
+def redact_cookie_header(value: str) -> str:
+    """Mask every cookie value, keep every attribute and every cookie name."""
+    parts = []
+    for chunk in str(value or "").split(";"):
+        piece = chunk.strip()
+        if not piece:
+            continue
+        name, sep, raw = piece.partition("=")
+        low = name.strip().lower()
+        if sep and low not in _COOKIE_ATTRS:
+            parts.append(f"{name.strip()}={redacted_marker(raw)}")
+        else:
+            parts.append(piece)
+    return "; ".join(parts)
+
+
+def redact_header(name: str, value: str) -> str:
+    """One header, redacted if its value is a credential. Non-sensitive headers pass through."""
+    low = str(name or "").strip().lower()
+    text = "" if value is None else str(value)
+    if not text:
+        return text
+    if low in ("set-cookie", "cookie"):
+        return redact_cookie_header(text)
+    if low in SENSITIVE_HEADERS:
+        return redacted_marker(text)
+    return text
+
+
+def scrub_headers(headers: dict | None) -> dict:
+    """Header map with every credential value replaced. Key order and names are preserved."""
+    return {k: redact_header(k, v) for k, v in (headers or {}).items()}
+
+
+def redact_url(url: str) -> str:
+    """Drop userinfo and mask sensitive query values, keeping scheme/host/path intact.
+
+    The path stays: it is the finding. Only the parts that authenticate a request go.
+    """
+    text = str(url or "")
+    if not text:
+        return text
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return text
+    netloc = parts.netloc
+    if "@" in netloc:
+        host = netloc.rsplit("@", 1)[1]
+        netloc = f"[redacted]@{host}"
+    query = parts.query
+    if query:
+        pairs = []
+        for name, value in parse_qsl(query, keep_blank_values=True):
+            if name.lower() in SENSITIVE_PARAMS and value:
+                pairs.append((name, redacted_marker(value)))
+            else:
+                pairs.append((name, value))
+        query = urlencode(pairs, safe="[]:,=")
+    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+
+
+def scrub_header_block(text: str) -> str:
+    """Redact a raw header dump ("name: value" per line), as used in evidence snippets.
+
+    `derive_findings()` stores the whole response header block as the snippet behind every
+    header claim — which is right (the evidence has to be checkable) and wrong (it carried
+    `authorization:` and `set-cookie:` verbatim). This keeps the block readable while making
+    the credential lines unreadable.
+    """
+    out = []
+    for line in str(text or "").splitlines():
+        name, sep, value = line.partition(":")
+        low = name.strip().lower()
+        if sep and (low in SENSITIVE_HEADERS or low in ("set-cookie", "cookie")):
+            out.append(f"{name}: {redact_header(name.strip(), value.strip())}")
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def scrub_urls(value, depth: int = 0):
+    """Walk a report fragment and redact every URL-shaped string it contains."""
+    if depth > 6:
+        return value
+    if isinstance(value, str):
+        return redact_url(value) if "://" in value else value
+    if isinstance(value, list):
+        return [scrub_urls(item, depth + 1) for item in value]
+    if isinstance(value, dict):
+        return {k: scrub_urls(v, depth + 1) for k, v in value.items()}
+    return value
+
+
 def host_of(url: str) -> str:
     try:
         return (urlsplit(url).hostname or "").lower()

@@ -1,13 +1,13 @@
 # 验收标准
 
-19 条验收项由 `tests/test_pipeline.py`（AC1–AC15）、`tests/test_triage.py`（AC16–AC17）、`tests/test_doctor.py`（AC18）与 `tests/test_web.py`（AC19）自动断言；并发、情报另有独立测试文件。运行：
+20 条验收项由 `tests/test_pipeline.py`（AC1–AC15）、`tests/test_triage.py`（AC16–AC17）、`tests/test_doctor.py`（AC18）、`tests/test_web.py`（AC19）与 `tests/test_redaction.py`（AC20）自动断言；运行：
 
 ```powershell
 python -m unittest discover -s tests -t .
 ```
 
-当前结果：**130 tests OK**（`test_pipeline.py` 68 / `test_concurrency.py` 11 / `test_web.py` 16 /
-`test_intel.py` 19 / `test_triage.py` 11 / `test_doctor.py` 5），全部走本地靶站或纯函数，不访问公网。
+当前结果：**150 tests OK**（`test_pipeline.py` 68 / `test_concurrency.py` 11 / `test_web.py` 16 /
+`test_intel.py` 19 / `test_triage.py` 11 / `test_doctor.py` 5 / `test_redaction.py` 20），全部走本地靶站或纯函数，不访问公网。
 
 ## 验收矩阵
 
@@ -32,6 +32,7 @@ python -m unittest discover -s tests -t .
 | AC17 | `--no-js` 仍产出端点面：不下载、不落盘 bundle，端点来自 `html-link / html-form / robots / sitemap / wayback` 且带 `sources`，JS 派生检查为 `unknown` | `TestNoJsMode::test_js_stage_is_skipped_and_no_bundle_is_saved` / `test_endpoints_come_from_non_js_sources` / `test_profile_is_attached_and_says_what_is_unknown` |
 | AC18 | 依赖自检回答「这台机器能不能跑」，而不是「库能不能 import」：5 项行为检查、失败保留异常文本、CLI 健康返回 0 / 坏掉返回 4 | `test_every_check_passes_in_this_environment` / `test_a_broken_check_is_reported_and_not_raised` / `test_cli_exits_zero_when_healthy_and_four_when_broken` |
 | AC19 | 横向对比接口需登录，每行给出 `worth / ease(100-hardness) / index / counts`（按当前模型重算评分）；子域作为 `probed:false` 资产落地 | `test_web.py::TestServer::test_compare_lists_every_run_with_three_decision_axes` / `test_intel.py::TestSubdomainsBecomeAssets` |
+| AC20 | 第五层兜底脱敏：`assets.hosts[].url`、`report.intel` 的 Wayback 行、`assets.well_known` 正文里的凭据形状都被抹掉，而计数/路径/Cookie 属性原样保留；重复清洗结果不变 | `test_redaction.py::TestWholeReportSweep::test_fields_that_used_to_leak_are_covered` / `test_strict_keys_are_masked_and_already_masked_values_are_left_alone` |
 
 > AC13 的「必备小节」由测试断言为 3 个（已确认事实 / 未覆盖项 / 建议动作）；`handoff.md` 实际含 5 节，
 > 停机条件在第 4 节。文档与断言以**测试**为准。

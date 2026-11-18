@@ -15,8 +15,9 @@ from . import brief as briefmod
 from . import doctor as doctormod
 from . import intel as intelmod
 from . import webprobe
-from .config import (PROFILES, RESERVED_RUN_NAMES, VERSION, ensure_out_dir, find_existing_run,
-                     profile as load_profile, run_dir_name)
+from .config import (AUTHORIZED_USE, AUTHORIZED_USE_SHORT, PROFILES, RESERVED_RUN_NAMES,
+                     VERSION, ensure_out_dir, find_existing_run, profile as load_profile,
+                     run_dir_name)
 from .http import Session
 from .util import ensure_dir, now_iso
 
@@ -117,7 +118,7 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
              allow_external: bool = False, verify_tls: bool = True, use_dns: bool = True,
              use_graphql: bool = True, quiet: bool = False,
              on_event=None, cancel=None, use_js: bool = True, use_intel: bool = True,
-             geo: bool = False, cve: bool = False) -> tuple[dict, int]:
+             geo: bool = False, cve: bool = False, authorized_by: str = "") -> tuple[dict, int]:
     """Run every probe once. `on_event` receives stage dicts; `cancel` is polled between stages.
 
     `use_js=False` skips bundle download + JS analysis entirely: endpoints then come from
@@ -178,6 +179,12 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
 
     status: dict[str, str] = {}
     emit("start", f"开始扫描 {domain}（profile={profile_name}）")
+    # Said once, at the top of every run, in the stream the console already shows: the
+    # notice has to be visible to the person starting the scan, not only to whoever opens
+    # the report afterwards. `--authorized-by` is what turns it from a warning into a record.
+    emit("authorize", AUTHORIZED_USE_SHORT +
+         (f"（授权依据：{authorized_by.strip()[:120]}）" if (authorized_by or "").strip()
+          else "（未填写 --authorized-by：报告会把授权依据记为未声明）"))
 
     dns_result = {"domain": domain, "records": {}, "errors": [], "dmarc": [], "spf": [], "resolvers": []}
     if use_dns:
@@ -238,7 +245,7 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
             web=web, dns=dns_result, crawl_result={}, js={}, api={}, findings=[], hyp=[],
             session=session, started_at=started_at, elapsed=time.time() - clock,
             probe_status={**status, "crawl": "skipped", "js": "skipped", "api": "skipped"},
-            intel=intel,
+            intel=intel, authorized_by=authorized_by,
         )
         reportmod.write_all(report, out_dir)
         return report, 3
@@ -320,7 +327,7 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
         domain=domain, root_url=root_url, profile_name=profile_name, limits=limits, web=web,
         dns=dns_result, crawl_result=crawl_result, js=js, api=api, findings=findings, hyp=hyp,
         session=session, started_at=started_at, elapsed=time.time() - clock, probe_status=status,
-        intel=intel,
+        intel=intel, authorized_by=authorized_by,
     )
     # The AI-facing brief lives beside the machine report so a task description can be
     # pasted from a file instead of reassembled by hand every time. Write it *before*
@@ -350,6 +357,11 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
 
 
 def cmd_scan(args) -> int:
+    """Run one scan from the command line."""
+    # Printed before the first request, and only for a human at a terminal: a JSON consumer
+    # or a quiet run does not need a legal notice in its stdout.
+    if not getattr(args, "quiet", False) and not getattr(args, "json", False):
+        print("[授权声明] " + AUTHORIZED_USE, file=sys.stderr)
     domain = _normalise_domain(args.domain)
     if not domain or "." not in domain:
         print(f"invalid domain: {args.domain}", file=sys.stderr)
@@ -365,7 +377,8 @@ def cmd_scan(args) -> int:
                             allow_external=args.allow_external, verify_tls=not args.insecure,
                             use_dns=not args.no_dns, use_graphql=not args.no_graphql,
                             quiet=args.quiet, use_js=not args.no_js,
-                            use_intel=not args.no_intel, geo=args.geo, cve=args.cve)
+                            use_intel=not args.no_intel, geo=args.geo, cve=args.cve,
+                            authorized_by=getattr(args, "authorized_by", ""))
     if args.json:
         print(json.dumps({"exit_code": code, "counts": report["coverage"]["counts"],
                           "hypotheses": report["hypotheses"][:5]}, ensure_ascii=False))
@@ -434,6 +447,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     scan = sub.add_parser("scan", help="run a full scan and write a report package")
+    scan.add_argument("--authorized-by", default="", metavar="TEXT",
+                      help="记录授权依据（工单号/合同编号/授权窗口），写入报告的 meta.authorization")
     scan.add_argument("--domain", required=True, help="authorized target domain, e.g. example.com")
     scan.add_argument("--out", default="",
                       help="output directory (default: <project>/runs/<domain>, "

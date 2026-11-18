@@ -9,6 +9,28 @@ VERSION = "1.0.0"
 SCHEMA_ID = "recon-one/1"
 DEFAULT_UA = "recon-one/1.0 (authorized security assessment)"
 
+# Authorised-use notice. It lives in config (not in a doc) because it has to reach three
+# places that a doc cannot: the console banner, the report's `meta.authorization`, and the
+# human-readable report header. One definition, no drift between them.
+AUTHORIZED_USE_VERSION = "1"
+AUTHORIZED_USE = (
+    "本工具只允许对**你拥有或已获得明确书面授权**的目标使用。运行前必须确认："
+    "(1) 目标所有者已书面同意本次侦察的范围与时间窗口；"
+    "(2) 你已了解本地法律对未授权访问的规定（例如《中华人民共和国刑法》第 285 条、"
+    "美国 CFAA 18 U.S.C. § 1030、英国 Computer Misuse Act 1990）；"
+    "(3) 你会在授权范围变化时立即停止。"
+    "工具不发送攻击载荷、不爆破口令、不做业务逻辑验证，但它产生的数据（端点、密钥线索、"
+    "历史路径）本身即为敏感信息，须按授权范围保管。"
+)
+AUTHORIZED_USE_SHORT = "仅限已获书面授权的目标；未授权使用可能构成犯罪。"
+
+# What the operator must have before a scan is legitimate. Recorded verbatim in the report so
+# an auditor can see which premises the run rested on, rather than taking it on trust.
+AUTHORIZED_USE_PREMISES = (
+    "written authorization from the target owner covering scope and time window",
+    "awareness of applicable computer-misuse law in the operator's jurisdiction",
+    "a stop condition if authorization changes or is withdrawn",
+)
 # Every limit is explicit so a scan can be budgeted before it starts.
 PROFILES: dict[str, dict[str, Any]] = {
     "fast": {

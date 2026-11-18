@@ -146,6 +146,14 @@ def build_brief(report: dict, budget: int = DEFAULT_BUDGET, report_dir: str = ""
     b.add("- 下列信息**已由自动化侦察完成并带证据**，不要重复抓取、下载或逆向前端。")
     b.add("- 端点的 `偏移` 与原文片段在报告包的 `raw/` 内，需要复核时按报告目录定位。")
     b.add("- 「未覆盖」一节列出**确实没做**的事，那才是需要你投入的方向。")
+    # The brief is the one artefact a downstream agent is told to read first, so the
+    # authorised-use line has to be in it: an agent that cannot see the constraint will
+    # happily propose steps the operator is not allowed to take.
+    auth = ((report.get("meta") or {}).get("authorization") or {})
+    if auth:
+        by = auth.get("authorized_by") or ""
+        b.add(f"- **授权**：{auth.get('summary', '')}"
+              f"（依据：{by if by else '未声明'}）。报告中的数据按授权范围保密。")
 
     # --- 1. Profile: is it worth attacking, how hard, how good the odds ---------
     # Placed above the factual sections on purpose: an operator decides *whether* the

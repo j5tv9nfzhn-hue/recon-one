@@ -340,6 +340,21 @@
     node.hidden = !message;
   };
 
+  /* 授权声明：服务端是唯一来源（config.AUTHORIZED_USE_*），前端只负责显示。
+     登录页与扫描页都显示，因为「能不能对这个目标做」在点扫描之前就要回答。 */
+  const applyAuthorization = (authz) => {
+    if (!authz) return;
+    const short = authz.summary || "";
+    const full = authz.notice || "";
+    const gate = $("gateAuthz");
+    if (gate && short) gate.textContent = short;
+    const hint = $("authHint");
+    if (hint) {
+      hint.textContent = full || short;
+      hint.title = authz.notice_version ? `声明版本 ${authz.notice_version}` : "";
+    }
+  };
+
   const renderGate = (configured) => {
     clearTimeout(state.timer);
     state.timer = null;
@@ -457,6 +472,7 @@
           use_intel: $("swIntel").checked,
           geo: $("swGeo").checked,
           cve: $("swCve").checked,
+          authorized_by: $("authorizedBy").value.trim(),
         },
       });
       $("liveLog").textContent = "";
@@ -1265,6 +1281,7 @@
       state.configured = !!data.configured;
       state.rememberDays = data.remember_days || 30;
       $("ver").textContent = data.version || "";
+      applyAuthorization(data.authorization);
       if (data.authed) enterApp();
       else renderGate(state.configured);
     })

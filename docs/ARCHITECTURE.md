@@ -56,8 +56,9 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 
 | 模块 | 行数 | 扇入 | 职责 |
 |---|---:|---:|---|
-| `util.py` | 205 | 8 | 哈希、脱敏、URL 归一化、确定性 JSON、JS 美化、端点归一 |
-| `config.py` | 177 | 8 | 版本号、三档扫描预算、输出根解析、规则加载（带缓存） |
+| `util.py` | 334 | 8 | 哈希、密钥脱敏、**响应头/URL/证据片段脱敏**、URL 归一化、确定性 JSON、JS 美化、端点归一 |
+| `redact.py` | 111 | 1 | 第五层兜底脱敏：按形状扫描整份报告（Bearer/JWT/`token=`/凭据键名/任意 URL），并输出可机读的 `meta.redaction` |
+| `config.py` | 199 | 8 | 版本号、**授权声明常量**、三档扫描预算、输出根解析、规则加载（带缓存） |
 | `http.py` | 275 | 3 | 作用域守卫的 HTTP 客户端，字节/时间预算、手动跟随重定向、解压上限、TLS 证书探测 |
 | `dns.py` | 283 | 1 | 自实现 DNS 线格式（A/AAAA/CNAME/MX/NS/TXT/SOA），校验应答源与 txid，无 dnspython |
 | `concurrency.py` | 170 | 1 | 并发抓取（httpx + anyio，硬依赖）：同序返回、共享字节预算 |
@@ -69,11 +70,11 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 | `triage.py` | 393 | 1 | 目标画像：10 项价值 + 9 项难度规则表（含两项主动实测）、覆盖率门槛、机会指数（非概率）、passive/active 与权重占比 |
 | `hypotheses.py` | 165 | 1 | 决策层：把事实转成带前置条件、验证步骤、成本与增益的假设 |
 | `score.py` | 782 | 2 | 证据门控评分：18 个原子检查、两轴、覆盖率门槛、triage 规则树 |
-| `report.py` | 692 | 1 | 报告组装、画像注入（`profile`）、子域资产、主动遥测（`probe_stats`）、Schema 校验、markdown/handoff 渲染、manifest 与写出 |
-| `brief.py` | 377 | 1 | AI 简报：画像摘要 + 按决策价值排序、硬字符预算、显式省略计数 |
+| `report.py` | 779 | 1 | 报告组装、画像注入（`profile`）、子域资产、主动遥测、**授权块与四层脱敏**、Schema 校验、markdown/handoff 渲染、manifest |
+| `brief.py` | 385 | 1 | AI 简报：授权行 + 画像摘要 + 按决策价值排序、硬字符预算、显式省略计数 |
 | `doctor.py` | 148 | 2 | 依赖自检：行为级验证 httpx 客户端、anyio TaskGroup+限流器、DNS 套接字、TLS 校验；不联网 |
-| `cli.py` | 499 | 2 | 参数解析、阶段编排（含 `intel` / `--no-js`）、`doctor` 子命令、事件回调、退出码 |
-| `web.py` | 697 | 2 | 控制台后端：静态资源 + JSON API（统一鉴权）、多目标并行批次、产物管理、读时重算评分、`/api/compare` |
+| `cli.py` | 514 | 2 | 参数解析（含 `--authorized-by`）、阶段编排、`doctor` 子命令、授权横幅、事件回调、退出码 |
+| `web.py` | 708 | 2 | 控制台后端：静态资源 + JSON API（统一鉴权）、多目标并行批次、产物管理、读时重算评分、`/api/compare`、授权声明透出 |
 | `auth.py` | 228 | 1 | 一次性配对令牌、PBKDF2 密码、30 天持久会话（哈希落盘）与失败限流 |
 
 `web.py` 与 `cli.py` 之间是**单向**依赖：控制台不含任何探测逻辑，所以命令行与浏览器产出**字节一致**的报告。
@@ -175,11 +176,29 @@ max_js_bytes / max_total_bytes / timeout / budget_seconds` 写死，并回显在
 每个端点、密钥、风险提示都带 `{file, offset, snippet}`，`file` 指向 `runs/<domain>/raw/` 下的真实产物。
 报告不是裸字符串列表，任何结论都能回到原文核对。
 
-### 4.5 脱敏是双层的
-1. `util.redact()` 只输出 `masked + sha256_12 + length`；
-2. `jsanalyze.analyze()` 结尾对整个结果做一次**全文替换**——因为「引用密钥的证据片段」和密钥本身一样会泄露。
+### 4.5 脱敏是五层的（覆盖是默认的，不是靠记性）
+1. `util.redact()` 只输出 `masked + sha256_12 + length`（密钥：人工复核需要认得出来）；
+2. `jsanalyze.analyze()` 结尾对整个结果做一次**全文替换**——「引用密钥的证据片段」和密钥本身一样会泄露；
+3. **响应头与 URL**：`util.scrub_headers()` / `scrub_urls()`。`Set-Cookie` 只抹 `name=value` 的值、
+   保留 `HttpOnly/Secure/SameSite/Path/Max-Age`（属性本身就是判定依据），值替换为
+   `[redacted:<sha12>:len=n]`——不含原文任何字符，但能证明"我见过这个值"；URL 去掉 userinfo、
+   抹掉 `token/key/sig/session…` 的值，**路径保留**（路径就是发现）；
+4. **证据片段**：`report._scrub_findings()` 处理 `evidence[].snippet` 里的原始响应头块，
+   `_scrub_hypothesis()` 处理假设文本。这两处是真实漏点——`derive_findings()` 会把整块响应头
+  存成证据，`authorization:` 与 `set-cookie:` 原文曾从这里绕过前三层。
+5. **整份报告的兜底扫描**：`redact.scrub_report()` 在 `assemble()` 把报告交出去之前按**形状**
+   再走一遍——`Bearer …` / `Basic …`、JWT、任意 `…token=…` 行内键值、凭据命名的键
+   （`password`/`token`/`secret`…，按**精确键名**匹配，因此 `auth_surface` 这类检查项 id
+   不会被误杀）、以及所有带 `://` 的字符串。加这一层的理由很直接：`assets.hosts[].url`
+   （来自 JS 字面量）、`report.intel`（Wayback 行里可能带 token）、`assets.well_known` 正文
+   都不在前四层的覆盖面上，而**以后新加的字段同样不会自动被前四层覆盖**。
+   代价只有一次确定性遍历；收益是"新字段默认安全"。
 
-密钥原文只落在 `raw/js/`，`report.json` 全文不含原文。
+密钥原文只落在 `raw/js/`；`report.json` 全文不含密钥、会话 Cookie 值、URL 凭据。
+每份报告的 `meta.redaction` 记录层数、作用范围与例外（`raw/` 保留原始字节用于复核，
+且 `runs/` 被 `.gitignore` 排除），因此"脱敏到什么程度"是**可机读核对**的，不是口头承诺。
+`tests/test_redaction.py` 用「构造一个全是秘密的响应 → 断言整份 JSON 里一个都不出现」验证，
+而不是只断言掩码存在；其中 `TestWholeReportSweep` 专门盯第五层与幂等性。
 
 ### 4.6 规则是数据，不是代码
 `rules/technologies.json`（47 条指纹）与 `rules/secrets.json`（17 条密钥正则）由 `config.load_rule()`
@@ -242,6 +261,6 @@ runs/<domain>/
 | 新的报告字段 | 同步改 `report.SCHEMA` 与 `assemble()`，`validate()` 会自动校验 |
 | 新的输入方式 | 复用 `cli.run_scan(on_event=..., cancel=...)`，参考 `web.py` 的 worker 线程写法 |
 
-新增模块时请保持四条不变式：**探测逻辑只依赖标准库**（依赖必须显式声明且启动即校验）、
+新增模块时请保持五条不变式：**探测逻辑只依赖标准库**（依赖必须显式声明且启动即校验）、
 **依赖方向朝向 `config`/`util`**、**"没观测到"必须表达成 `unknown` 而不是 `fail`**、
-**每项结论必须能标出 `passive` 或 `active`**。
+**每项结论必须能标出 `passive` 或 `active`**、**进入报告的每个字符串要么不含凭据，要么经过 `util.scrub_*`**。

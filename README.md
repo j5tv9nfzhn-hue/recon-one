@@ -1,5 +1,25 @@
 # recon-one
 
+> ## ⚠ 授权要求（使用前必读）
+>
+> 本工具只允许对**你拥有、或已获得目标所有者书面授权**的目标使用。运行前请确认三件事：
+> ① 授权覆盖本次侦察的**范围与时间窗口**；② 你已了解所在辖区对未授权访问的规定
+> （例如《中华人民共和国刑法》第 285 条、美国 CFAA 18 U.S.C. § 1030、英国 Computer Misuse Act 1990）；
+> ③ 授权变更或撤回时你会**立即停止**。
+>
+> 未经授权对第三方目标使用可能构成**犯罪**，并可能同时构成民事侵权。工具的产出（端点清单、
+> 密钥线索、历史路径、子域）本身即为敏感信息，须按授权范围保管。
+>
+> 授权会**写进每一份报告**：`meta.authorization` + `report.md` 的「授权声明」一节 + 简报首屏。
+> 用 `--authorized-by "工单号/合同号"`（控制台为「授权依据」输入框）记录依据；留空不会被拒绝，
+> 但报告会明确写「未声明」。完整条文见 [docs/AUTHORIZED-USE.md](docs/AUTHORIZED-USE.md)，
+> 仓库级声明与漏洞报告渠道见 [SECURITY.md](SECURITY.md)。
+>
+> **数据脱敏**：`report.json / report.md / handoff.md / brief.md` 写出前经过五层脱敏（JS 密钥、
+> 响应头凭据、URL userinfo 与敏感参数、证据片段、整份报告形状兜底），并写出可机读的
+> `meta.redaction`。例外只有本地 `raw/` 原始产物（复核用，被 `.gitignore` 排除）——
+> 对外交付请只带 `report/`。
+
 单域名、本地化、零安装的多合一侦察程序。输入一个域名（或一批域名），输出一份**红队 AI 可直接消费**的结构化报告包。
 
 它的存在理由只有一条：把「AI 花时间在前端 JS 和 API 上做逆向」这件事**一次性做掉**，并把结果变成带证据、带优先级、带停机条件的判断材料，而不是又一份端点列表。
@@ -16,7 +36,7 @@ cd recon-one
 python -m reconone doctor                     # 先确认 httpx/anyio/ssl/dns 真的能用（1 秒，不联网）
 python -m reconone ui                         # 启动 Web 控制台（前后端同一进程）
 python -m reconone scan --domain example.com --profile default   # 纯命令行
-python -m unittest discover -s tests -t .     # 130 项测试（全部本地、不联网）
+python -m unittest discover -s tests -t .     # 150 项测试（全部本地、不联网）
 ```
 
 常用开关（`scan`）：`--no-js` 不下载前端 bundle、`--no-intel` 关闭被动情报、`--geo` 查 IP 地理位置、
@@ -162,7 +182,7 @@ runs/<domain>/
 
 ## 4. 验收标准
 
-完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。19 条验收项由测试断言。当前全仓 **130 tests OK**（`test_pipeline` 68 / `test_concurrency` 11 / `test_web` 16 / `test_intel` 19 / `test_triage` 11 / `test_doctor` 5），`python -m unittest discover -s tests -t .` 可直接复现。
+完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。20 条验收项由测试断言。当前全仓 **150 tests OK**（`test_pipeline` 68 / `test_concurrency` 11 / `test_web` 16 / `test_intel` 19 / `test_triage` 11 / `test_doctor` 5 / `test_redaction` 20），`python -m unittest discover -s tests -t .` 可直接复现。
 
 ## 5. 已知限制
 
@@ -186,9 +206,10 @@ recon-one/
   rules/       technologies.json (47 条), secrets.json (17 条), score.json (权重与评级)
   tests/       fixture_server.py, test_pipeline.py, test_concurrency.py, test_web.py,
                test_intel.py, test_triage.py, test_doctor.py
-  webui/       index.html, app.js, app.css（无框架、无构建）
+               test_intel.py, test_triage.py, test_doctor.py, test_redaction.py
   docs/        ARCHITECTURE.md, INTEL.md（被动/主动与画像算法）, ACCEPTANCE.md, SCORING.md,
-               WEB-UI.md, RESEARCH.md 等
+               WEB-UI.md, RESEARCH.md, AUTHORIZED-USE.md 等
+  SECURITY.md  仓库级授权声明 + 本工具漏洞报告渠道 + 五层脱敏范围
   runs/        扫描产物（运行时生成，按目标域名分目录）
   state/       auth.json（PBKDF2 凭据）、sessions.json（会话哈希，30 天）
 ```

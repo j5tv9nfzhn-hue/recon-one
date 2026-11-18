@@ -270,6 +270,21 @@ a { color: inherit; }
   line-height: 1.6;
 }
 
+/* 授权声明：比凭据说明更靠前、更醒目，但不抢主操作的视觉层级。
+   用左侧 2px 竖线代替卡片或阴影，符合「层级靠排版与留白」的约束。 */
+.gate__foot--authz {
+  margin-top: 18px;
+  padding-top: 0;
+  border-top: 0;
+  border-left: 2px solid var(--warn);
+  padding-left: 10px;
+  color: var(--ink-3, var(--ink-4));
+}
+
+.gate__foot--authz + .gate__foot {
+  margin-top: 14px;
+}
+
 /* ───────────────────────────── form primitives ───────────────────────────── */
 
 .form { display: grid; gap: 14px; }

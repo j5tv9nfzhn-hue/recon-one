@@ -110,7 +110,8 @@ recon-one/
 | `tests/test_intel.py` | 19 | CT 只留目标域、CertSpotter 失败回退 crt.sh、失败折叠成 `status`、存档路径与敏感路径、geo/CVE 默认关闭、站点类型规则、**重试吞掉一次 502**、**子域落地成 `probed:false` 资产**、digest 排除运行遥测 |
 | `tests/test_triage.py` | 11 | 权重恒定、指数与带、覆盖率不足拒绝出结论、WAF/版本抬难度、端点面抬价值、`unknown≠fail`、同输入同输出、**主动项接线与权重占比** |
 | `tests/test_doctor.py` | 5 | 五项行为检查全过、版本可读、坏检查被报告而不抛出、CLI 退出码 0/4 |
-| **合计** | **130** | `python -m unittest discover -s tests -t .` 全绿（约 74s） |
+| `tests/test_redaction.py` | 20 | 四层定点脱敏（头/URL/证据/密钥）+ **第五层整份报告形状扫描**：`hosts[].url`、`intel.archive` 行、`well_known` 正文里的凭据都不出现，计数/路径/Cookie 属性保留，清洗幂等，`meta.redaction` 例外可机读 |
+| **合计** | **150** | `python -m unittest discover -s tests -t .` 全绿（约 86s） |
 
 新增的关键回归：
 

@@ -4,12 +4,14 @@ from __future__ import annotations
 import json
 import os
 import time
-
 from . import doctor as doctormod
 from . import score as scoremod
+from . import redact as redactmod
 from . import triage as triagemod
-from .config import SCHEMA_ID, VERSION
-from .util import VOLATILE_HEADERS, canonical_json, now_iso, sha256_text
+from .config import (AUTHORIZED_USE, AUTHORIZED_USE_PREMISES, AUTHORIZED_USE_SHORT,
+                     AUTHORIZED_USE_VERSION, SCHEMA_ID, VERSION)
+from .util import (VOLATILE_HEADERS, canonical_json, now_iso, redact_header, scrub_header_block,
+                   scrub_headers, scrub_urls, sha256_text)
 
 SCHEMA = {
     "$schema": "http://json-schema.org/draft-07/schema#",
@@ -233,9 +235,43 @@ def _probe_stats(session, js: dict | None = None) -> dict:
         "js_fetched": int((stats.get("stats") or {}).get("fetched", 0) or 0),
     }
 
+def _scrub_findings(items: list[dict]) -> list[dict]:
+    """Findings carry a raw header block as their evidence snippet; redact it in place.
+
+    The snippet is the *reason* a reader can check a header claim offline, so it has to stay.
+    What it must not carry is the credential lines inside it — `authorization:` and
+    `set-cookie:` used to arrive verbatim through this path even after the header map itself
+    was scrubbed.
+    """
+    out = []
+    for item in items or []:
+        finding = dict(item)
+        finding["detail"] = scrub_header_block(finding.get("detail", ""))
+        evidence = []
+        for ev in finding.get("evidence") or []:
+            entry = dict(ev)
+            if isinstance(entry.get("snippet"), str):
+                entry["snippet"] = scrub_header_block(entry["snippet"])
+            if isinstance(entry.get("value"), str):
+                entry["value"] = redact_header(str(entry.get("name", "")), entry["value"])
+            evidence.append(entry)
+        finding["evidence"] = evidence
+        out.append(finding)
+    return scrub_urls(out)
+
+
+def _scrub_hypothesis(item: dict) -> dict:
+    """Hypotheses quote findings; the quote must not reintroduce a credential."""
+    out = dict(item)
+    for key in ("detail", "success_signal", "precondition"):
+        if isinstance(out.get(key), str):
+            out[key] = scrub_header_block(out[key])
+    return scrub_urls(out)
+
+
 def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, js, api,
              findings, hyp, session, started_at, elapsed, probe_status,
-             intel: dict | None = None) -> dict:
+             intel: dict | None = None, authorized_by: str = "") -> dict:
     sourcemaps = [s["sourcemap"] for s in js.get("scripts", []) if s.get("sourcemap")]
     # Passive assets and active-probe telemetry are computed once, here, so every consumer
     # (markdown, brief, console, compare view) reads the same numbers.
@@ -246,17 +282,23 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
         "technology": web.get("tech", []),
         # Raw response headers are the evidence base for every header claim. Keeping them
         # makes each finding auditable offline instead of pointing at "response headers".
+        #
+        # They are also the one place a live session credential used to reach the report:
+        # `Set-Cookie` arrived verbatim. Names stay (their presence *is* the finding), values
+        # are replaced with `[redacted:<sha12>:len=n]` — enough to prove identity, useless
+        # for replay. Cookie attributes survive so `HttpOnly`/`Secure` analysis still works.
         "http": {
-            "root_url": web.get("root_url", ""),
+            "root_url": scrub_urls(web.get("root_url", "")),
             "status": web.get("status", 0),
-            "final_url": web.get("final_url", ""),
-            "redirect_chain": web.get("redirect_chain", []),
-            "headers": web.get("headers", {}),
+            "final_url": scrub_urls(web.get("final_url", "")),
+            "redirect_chain": scrub_urls(web.get("redirect_chain", [])),
+            "headers": scrub_headers(web.get("headers", {})),
             "security": web.get("security", {}),
             "cookies": web.get("cookies", []),
             "tls": web.get("tls", {}),
         },
-        "scripts": [{"url": s["url"], "bytes": s.get("bytes", 0), "sha256": s.get("sha256", ""),
+        "scripts": [{"url": scrub_urls(s["url"]), "bytes": s.get("bytes", 0),
+                     "sha256": s.get("sha256", ""),
                      "status": s.get("status"),
                      # A script that failed to download must say why; `bytes: 0` alone reads
                      # as "empty file" and hides a 403 or a scope refusal.
@@ -268,7 +310,7 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
         "hosts": js.get("hosts", []),
         "subdomains": subdomains,
         "forms": crawl_result.get("forms", []),
-        "pages": [{"url": p["url"], "status": p["status"], "title": p["title"],
+        "pages": [{"url": scrub_urls(p["url"]), "status": p["status"], "title": p["title"],
                    "depth": p["depth"]} for p in crawl_result.get("pages", [])],
         "cookies": web.get("cookies", []),
         "tls": web.get("tls", {}),
@@ -276,6 +318,9 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
         "well_known": web.get("well_known", {}),
         "chunks": js.get("chunks", []),
     }
+    # Everything that quotes the response is scrubbed here, once, before it enters the report.
+    findings = _scrub_findings(findings)
+    hyp = [_scrub_hypothesis(item) for item in (hyp or [])]
     endpoints = js.get("endpoints", [])
     for spec in api.get("specs", []):
         endpoints.extend(spec["endpoints"])
@@ -293,6 +338,18 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
             "scope_blocks": len(session.off_scope_attempts),
             "deps": deps,
             "probe_stats": probe_stats,
+            "redaction": redactmod.scope_note(),
+            # The premises this run rested on, recorded rather than assumed. `authorized_by`
+            # is free text (ticket id, contract reference, pentest window) so an auditor can
+            # tie the package to the paper that allowed it.
+            "authorization": {
+                "notice_version": AUTHORIZED_USE_VERSION,
+                "notice": AUTHORIZED_USE,
+                "summary": AUTHORIZED_USE_SHORT,
+                "premises": list(AUTHORIZED_USE_PREMISES),
+                "authorized_by": (authorized_by or "").strip()[:200],
+                "declared": bool((authorized_by or "").strip()),
+            },
         },
         "target": {"domain": domain, "root_url": root_url,
                    "https": web.get("https_available", False),
@@ -327,7 +384,9 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
         "graphql": (api.get("graphql") or {}).get("endpoints", []),
         "findings": findings,
         "hypotheses": hyp,
-        "errors": session.errors,
+        # Error records carry URLs: a failed request to `https://u:p@host/?token=…` would
+        # otherwise paste credentials into the report through the back door.
+        "errors": scrub_urls(session.errors),
         "artifacts": [],
     }
     # Scoring is a pure function of the assembled report, so it can be recomputed offline
@@ -336,6 +395,10 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
     # Passive intel and the target profile are attached last, but *before* the digest, so a
     # reader can verify the whole package with one hash.
     report["intel"] = intel or {}
+    # Fifth redaction layer: a shape-based sweep over the *whole* report, so fields added
+    # later (JS-derived host URLs, third-party archive rows, well-known bodies) are covered
+    # by default. Runs before the profile/digest so every derived artefact sees masked text.
+    report = redactmod.scrub_report(report)
     report["profile"] = triagemod.build(report, report["intel"])
     report["meta"]["deterministic_digest"] = sha256_text(
         canonical_json(_digest_view(report)))[:16]
@@ -389,7 +452,13 @@ def _digest_view(report: dict) -> dict:
     # digest" keeps meaning what it says.
     view["meta"] = {kk: vv for kk, vv in report["meta"].items()
                     if kk not in ("generated_at", "started_at", "elapsed_seconds",
-                                  "probe_stats", "deps")}
+                                  "probe_stats", "deps", "authorization")}
+    # Who was authorised to look is not a property of the target: two operators scanning the
+    # same site with different paperwork must digest the same. The notice version stays, so a
+    # change in the wording of the notice is still visible in the digest.
+    auth = (report["meta"].get("authorization") or {})
+    if auth:
+        view["meta"]["authorization"] = {"notice_version": auth.get("notice_version", "")}
     if "intel" in report:
         view["intel"] = _stable_intel(report.get("intel"))
     if "profile" in report:
@@ -524,6 +593,27 @@ def _profile_markdown(report: dict) -> list[str]:
     return lines
 
 
+def _authorization_markdown(report: dict) -> list[str]:
+    """The notice, verbatim, at the top of the human-readable report.
+
+    A report gets forwarded, archived and pasted into tickets; the person reading it is often
+    not the person who ran the scan. So the premises travel with the data instead of living
+    only in a README that nobody opens.
+    """
+    auth = ((report.get("meta") or {}).get("authorization") or {})
+    if not auth:
+        return []
+    by = auth.get("authorized_by") or ""
+    lines = ["## 授权声明", "", "> " + (auth.get("notice") or AUTHORIZED_USE), "",
+             f"- 授权依据：{by if by else '**未声明**（运行时未提供 --authorized-by）'}",
+             f"- 声明版本：{auth.get('notice_version', '?')}",
+             "- 使用前提："]
+    lines += [f"  {i}. {item}" for i, item in enumerate(auth.get("premises") or [], 1)]
+    lines += ["", "本报告中的数据（端点、密钥线索、历史路径、子域）按授权范围保密；"
+                  "泄露给未获授权的第三方可能同时构成违约与违法。", ""]
+    return lines
+
+
 def render_markdown(report: dict) -> str:
     t = report["target"]
     c = report["coverage"]["counts"]
@@ -531,9 +621,10 @@ def render_markdown(report: dict) -> str:
              f"- 根地址：{t['root_url']}（HTTP {t['status']}）",
              f"- 生成时间：{report['meta']['generated_at']}，耗时 {report['meta']['elapsed_seconds']}s",
              f"- 请求数 {report['meta']['requests']}，字节 {report['meta']['bytes']}",
-             f"- 覆盖完整：{report['coverage']['complete']}，截断：{report['coverage']['truncated']}", "",
-             "## 覆盖计数", "",
-             "| 项 | 数量 |", "|---|---|"]
+             f"- 覆盖完整：{report['coverage']['complete']}，截断：{report['coverage']['truncated']}", ""]
+    lines += _authorization_markdown(report)
+    lines += ["## 覆盖计数", "",
+              "| 项 | 数量 |", "|---|---|"]
     for key, value in c.items():
         lines.append(f"| {key} | {value} |")
     lines += _score_markdown(report)
@@ -574,6 +665,8 @@ def render_handoff(report: dict) -> str:
         f"- 报告 schema：`{report['schema']}`；机器读取请用 `report/report.json`，不要解析本文件。",
         f"- 资产哈希见 `report/manifest.json`；原始证据在 `raw/`，端点证据带 file+offset。",
         "- 本文件是决策摘要：只列出已确认事实、未知项与建议的下一步。",
+        f"- **授权**：{((report.get('meta') or {}).get('authorization') or {}).get('summary', AUTHORIZED_USE_SHORT)}"
+        f" 依据：{(((report.get('meta') or {}).get('authorization') or {}).get('authorized_by')) or '未声明'}。",
         "",
         "## 1. 已确认事实（可直接采信）",
         f"- 目标可达：{report['target']['root_url']}，HTTP {report['target']['status']}，标题「{report['target']['title']}」。",

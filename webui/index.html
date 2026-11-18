@@ -50,6 +50,9 @@
       <p class="form__hint" id="rememberHint">登录后本浏览器将保持登录。</p>
     </form>
 
+    <p class="gate__foot gate__foot--authz" id="gateAuthz">
+      仅限已获书面授权的目标；未授权使用可能构成犯罪。
+    </p>
     <p class="gate__foot">
       凭据仅保存在本运行目录 <span class="mono">state/auth.json</span>，
       以 PBKDF2-HMAC-SHA256（240 000 轮、随机盐）存储。
@@ -272,6 +275,16 @@
               <label class="check"><input type="checkbox" id="swCve"><span>CVE 线索</span></label>
             </div>
           </div>
+
+          <label class="field">
+            <span class="field__label">授权依据（写入报告 meta.authorization，可留空但会被记为未声明）</span>
+            <input class="input mono" id="authorizedBy" type="text" maxlength="200"
+                   autocomplete="off" placeholder="工单号 / 合同编号 / 授权窗口，例如 SOW-2026-014">
+          </label>
+
+          <p class="note note--warn" id="authHint">
+            仅限已获书面授权的目标。报告会记录本字段；未填写时报告写明「未声明」。
+          </p>
 
           <p class="note note--warn" id="extHint" hidden>
             关闭作用域守卫后，扫描会请求第三方主机并污染端点清单。仅在授权范围明确覆盖时才开启。

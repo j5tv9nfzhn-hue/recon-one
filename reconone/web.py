@@ -303,6 +303,12 @@ class Handler(BaseHTTPRequestHandler):
         payload = {"configured": auth.configured, "authed": authed,
                    "version": self.server.version,
                    "remember_days": auth.session_ttl // 86400,
+                   # The notice is public on purpose: it must be readable before anyone logs
+                   # in, because "may I point this at X" is decided before authenticating.
+                   # It carries no recon data, only the constraint.
+                   "authorization": {"summary": config.AUTHORIZED_USE_SHORT,
+                                     "notice_version": config.AUTHORIZED_USE_VERSION,
+                                     "notice": config.AUTHORIZED_USE},
                    # Before login only progress is visible: the full snapshot names the
                    # target, the run directory and the last 400 stage messages.
                    "job": job.snapshot() if authed else job.public_snapshot()}
@@ -411,13 +417,14 @@ class Handler(BaseHTTPRequestHandler):
                 bool(body.get("use_graphql", True)), bool(body.get("verify_tls", True)),
                 bool(body.get("use_js", True)), bool(body.get("use_intel", True)),
                 bool(body.get("geo", False)), bool(body.get("cve", False)),
+                str(body.get("authorized_by") or ""),
             ))
             job.thread.start()
         self._json(200, {"ok": True, "targets": targets, "parallel": job.parallel})
 
     # ------------------------------------------------------------------ batch runner
     def _run_batch(self, targets, profile, allow_external, use_dns, use_graphql, verify_tls,
-                   use_js=True, use_intel=True, geo=False, cve=False):
+                   use_js=True, use_intel=True, geo=False, cve=False, authorized_by=""):
         job: Job = self.server.job
         out_root = ensure_dir(os.path.join(self.server.root, "runs"))
 
@@ -456,6 +463,7 @@ class Handler(BaseHTTPRequestHandler):
                     allow_external=allow_external, verify_tls=verify_tls,
                     use_dns=use_dns, use_graphql=use_graphql, quiet=True,
                     use_js=use_js, use_intel=use_intel, geo=geo, cve=cve,
+                    authorized_by=authorized_by,
                     on_event=lambda ev: on_event(entry, ev), cancel=job.cancel,
                 )
             except cli.ScanCancelled:
@@ -653,7 +661,10 @@ def serve(host: str = "127.0.0.1", port: int = 8770, root: str | None = None,
     print(f"  监听     : http://{host}:{actual}/")
     print(f"  站点并行 : 会话内最多 {MAX_TARGET_PARALLEL} 个目标同时探测"
           "（RECONONE_TARGET_PARALLEL 可调，上限 8）")
-
+    # Said before the pairing token: the person starting the console is the person who has to
+    # be authorised, and this is the last moment it can be said cheaply.
+    print(f"  授权要求 : {config.AUTHORIZED_USE_SHORT}")
+    print(f"             {config.AUTHORIZED_USE}")
     if not srv.auth.configured:
         token = srv.auth.issue_token()
         print()
