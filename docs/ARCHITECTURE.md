@@ -70,7 +70,7 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 | `triage.py` | 393 | 1 | 目标画像：10 项价值 + 9 项难度规则表（含两项主动实测）、覆盖率门槛、机会指数（非概率）、passive/active 与权重占比 |
 | `hypotheses.py` | 165 | 1 | 决策层：把事实转成带前置条件、验证步骤、成本与增益的假设 |
 | `score.py` | 782 | 2 | 证据门控评分：18 个原子检查、两轴、覆盖率门槛、triage 规则树 |
-| `report.py` | 779 | 1 | 报告组装、画像注入（`profile`）、子域资产、主动遥测、**授权块与四层脱敏**、Schema 校验、markdown/handoff 渲染、manifest |
+| `report.py` | 785 | 1 | 报告组装、画像注入（`profile`）、子域资产、主动遥测、**授权块与五层脱敏**、Schema 校验、markdown/handoff 渲染、manifest |
 | `brief.py` | 385 | 1 | AI 简报：授权行 + 画像摘要 + 按决策价值排序、硬字符预算、显式省略计数 |
 | `doctor.py` | 148 | 2 | 依赖自检：行为级验证 httpx 客户端、anyio TaskGroup+限流器、DNS 套接字、TLS 校验；不联网 |
 | `cli.py` | 514 | 2 | 参数解析（含 `--authorized-by`）、阶段编排、`doctor` 子命令、授权横幅、事件回调、退出码 |
