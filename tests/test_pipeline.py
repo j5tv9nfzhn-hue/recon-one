@@ -57,6 +57,18 @@ class UnitTests(unittest.TestCase):
         self.assertTrue(_read_name(answer, 12)[0].startswith("example"))
 
 
+def _ledger(report_dir: str) -> list[dict]:
+    """Rows of `report/requests.jsonl`; an empty list when the ledger is missing."""
+    path = os.path.join(report_dir, "requests.jsonl")
+    if not os.path.isfile(path):
+        return []
+    rows = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            if line.strip():
+                rows.append(json.loads(line))
+    return rows
+
 class FixtureScan(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -167,6 +179,12 @@ class FixtureScan(unittest.TestCase):
             # Name the drifting field. Without this, a one-in-N failure is an unactionable
             # "digests differ" and the honest response is to retry until it passes.
             self.fail("determinism drift at " + ", ".join(_digest_drift(self.data, report)))
+        first = _ledger(self.report_dir)
+        second = _ledger(os.path.join(again, "report"))
+        self.assertTrue(first, "台账不能是空的")
+        self.assertEqual([tuple(sorted(row.items())) for row in first],
+                         [tuple(sorted(row.items())) for row in second],
+                         "同一目标的请求台账必须逐行一致（不含时间，所以可复现）")
 
     def test_ac15_manifest_lists_every_artifact(self):
         manifest = json.load(open(os.path.join(self.report_dir, "manifest.json"), encoding="utf-8"))
@@ -178,6 +196,25 @@ class FixtureScan(unittest.TestCase):
         # the manifest was built and therefore never appeared in the "every artifact" list.
         self.assertIn("report/brief.md", listed)
         self.assertEqual(manifest["validation"]["schema_errors"], [])
+
+    def test_ac25_request_ledger_is_complete_and_listed(self):
+        """The ledger answers "what did you actually send" — the question a customer asks."""
+        rows = _ledger(self.report_dir)
+        self.assertGreaterEqual(len(rows), 3)
+        self.assertEqual([row["n"] for row in rows], list(range(1, len(rows) + 1)))
+        for row in rows:
+            self.assertLessEqual(set(row), {"n", "method", "url", "status", "egress", "error"},
+                                 f"时间/耗时不得进台账（会破坏包级哈希）：{row}")
+            # GraphQL introspection is a POST: the "GET only" rule applies to the verification
+            # stage, not to the whole scan. The ledger must show that, not hide it.
+            self.assertIn(row["method"], ("GET", "HEAD", "POST"))
+            self.assertTrue(row["url"].startswith("http"), row)
+        root = self.report["target"]["root_url"]
+        self.assertTrue(any(row["url"].startswith(root.rstrip("/")) for row in rows),
+                        f"根 URL 必须出现在台账里：{root}")
+        manifest = json.load(open(os.path.join(self.report_dir, "manifest.json"), encoding="utf-8"))
+        entry = next(a for a in manifest["artifacts"] if a["path"] == "report/requests.jsonl")
+        self.assertNotEqual(entry["sha256_16"], "redacted", "台账没有密钥，应当有真实哈希")
 
 
     def test_verification_stage_is_bound_and_recorded(self):

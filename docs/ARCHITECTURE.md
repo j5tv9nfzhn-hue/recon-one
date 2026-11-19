@@ -75,7 +75,7 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 | `cookiejar.py` | 251 | 2 | Set-Cookie 会话保持（RFC 6265 实用子集）：`Domain`/`Path` 作用域、`Secure` 双向校验、`Max-Age`/`Expires`/删除、上限淘汰；**只接受目标或其子域的 Domain**，`stats()` 只给名称与计数 |
 | `hypotheses.py` | 165 | 1 | 决策层：把事实转成带前置条件、验证步骤、成本与增益的假设 |
 | `score.py` | 782 | 2 | 证据门控评分：18 个原子检查、两轴、覆盖率门槛、triage 规则树 |
-| `report.py` | 931 | 1 | 报告组装、画像注入、子域资产、主动遥测、`meta.egress`/`meta.roe`/`meta.session`（含 `cookies`）/`meta.rate`、验证块、会话与速率摘要、授权块与五层脱敏（含发出凭据的值级遮蔽）、Schema 校验、markdown/handoff 渲染 |
+| `report.py` | 968 | 1 | 报告组装、画像注入、子域资产、主动遥测、`meta.egress`/`meta.roe`/`meta.session`（含 `cookies`）/`meta.rate`、**请求台账 `requests.jsonl`**、验证块、会话与速率摘要、授权块与五层脱敏（含发出凭据的值级遮蔽）、Schema 校验、markdown/handoff 渲染 |
 | `brief.py` | 404 | 1 | AI 简报：授权行 + 画像摘要 + 验证结论 + 会话/速率行 + 按决策价值排序、硬字符预算 |
 | `doctor.py` | 148 | 2 | 依赖自检：行为级验证 httpx 客户端、anyio TaskGroup+限流器、DNS 套接字、TLS 校验；不联网 |
 | `cli.py` | 602 | 2 | 参数解析（`--authorized-by` / `--proxy` 系列 / `--no-verify` / `--cookie` / `--bearer` / `--header` / `--rate` / `--max-backoff` / `--no-cookies`）、出口解析、会话装配（注入 + jar）、验证阶段、阶段编排、`doctor`、退出码 |
@@ -126,7 +126,7 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
           │  ├── validate()      JSON Schema 子集校验
           │  ├── deterministic_digest  排除时间戳的稳定摘要
           │  ├── brief.build_brief()   brief.md（必须在 write_all 之前写，否则不进 manifest）
-          │  └── write_all()     report.json/md/handoff/schema + 3×jsonl + manifest
+          │  └── write_all()     report.json/md/handoff/schema + 4×jsonl + manifest
           ▼
        runs/<domain>/
 ```
@@ -325,6 +325,7 @@ runs/<domain>/
     endpoints.jsonl    流式，便于 grep/jq
     findings.jsonl
     hypotheses.jsonl
+    requests.jsonl    请求台账：method/url/status/egress/error（不含时间，故包级哈希可复现）
   raw/
     js/<sha16>.js          原始 bundle（密钥原文仅存在于此）
     js/<sha16>.pretty.js   按字符串字面量安全换行后的可读版

@@ -1,12 +1,12 @@
 # 验收标准
 
-24 条验收项由 `tests/test_pipeline.py`（AC1–AC15）、`tests/test_triage.py`（AC16–AC17）、`tests/test_doctor.py`（AC18）、`tests/test_web.py`（AC19）、`tests/test_redaction.py`（AC20）、`tests/test_egress.py`（AC21）、`tests/test_verify.py`（AC22）、`tests/test_session.py`（AC23）与 `tests/test_cookies.py`（AC24）自动断言；运行：
+25 条验收项由 `tests/test_pipeline.py`（AC1–AC15、AC25）、`tests/test_triage.py`（AC16–AC17）、`tests/test_doctor.py`（AC18）、`tests/test_web.py`（AC19）、`tests/test_redaction.py`（AC20）、`tests/test_egress.py`（AC21）、`tests/test_verify.py`（AC22）、`tests/test_session.py`（AC23）与 `tests/test_cookies.py`（AC24）自动断言；运行：
 
 ```powershell
 python -m unittest discover -s tests -t .
 ```
 
-当前结果：**243 tests OK**（`test_pipeline.py` 69 / `test_concurrency.py` 11 / `test_web.py` 17 /
+当前结果：**244 tests OK**（`test_pipeline.py` 70 / `test_concurrency.py` 11 / `test_web.py` 17 /
 `test_intel.py` 19 / `test_triage.py` 11 / `test_doctor.py` 5 / `test_redaction.py` 28 /
 `test_egress.py` 16 / `test_verify.py` 10 / `test_session.py` 34 / `test_cookies.py` 23），全部走本地靶站或纯函数，不访问公网。
 
@@ -38,6 +38,7 @@ python -m unittest discover -s tests -t .
 | AC22 | 轻量验证：每端点一次 GET，可用（2xx/3xx/401/403/405/429）标红、404/410 与连接失败标灰；RoE 限定方法与上限、破坏性路径不发送、越界请求被作用域守卫拦下且记录；`meta.roe` + `verification.summary` 可追溯；TLS 证书探测与请求走同一出口 | `test_verify.py`（10 项）/ `test_pipeline.py::FixtureScan::test_verification_stage_is_bound_and_recorded` |
 | AC23 | 会话注入与限速：Cookie/Bearer/自定义头到达服务端且重定向后仍携带；`meta.session` 只含头名与 Cookie 键名（**无键名的裸 Cookie 片段只计数**），`describe()`/`secrets()` 都不写出值，整包产物里搜不到任何凭据；`--rate N` 按 host 独立限速（`wait_ms` 逐请求记账），429/503 按 `Retry-After` 或指数退避（0.5→8s 封顶）推后该 host 的下一次请求，成功即重置；单次等待有上限且受预算约束 | `test_session.py`（34 项）/ `test_web.py::TestConsoleSessionPassThrough` |
 | AC24 | Set-Cookie 会话保持：`Domain`/`Path`/`Secure`/`Max-Age` 按 RFC 6265 子集收发，`Max-Age=0` 即删除；**`Domain` 只接受目标或其子域**（`.com` 拒收并计数）；`--cookie` 的同名值优先于 jar；第二跳请求自动带上第一跳拿到的会话（`/app` 由 401 变 200）；`meta.session.cookies` 只记计数与名称，整包文件搜不到任何 cookie 值；`--no-cookies` 关闭 | `test_cookies.py`（23 项） |
+| AC25 | 请求台账：`report/requests.jsonl` 逐行记录本次真正发出的每个请求（`n/method/url/status/egress/error`，URL 已脱敏、**不含时间与耗时**），按 `(method,url,status,error)` 排序后编号，因此同目标两次扫描字节一致；该文件进入 `manifest.json` 且带真实 sha256（非 `redacted`）；GraphQL introspection 的 POST 也必须出现在台账里 | `test_pipeline.py::FixtureScan::test_ac25_request_ledger_is_complete_and_listed` / `test_ac14_determinism` |
 
 > AC13 的「必备小节」由测试断言为 3 个（已确认事实 / 未覆盖项 / 建议动作）；`handoff.md` 实际含 5 节，
 > 停机条件在第 4 节。文档与断言以**测试**为准。

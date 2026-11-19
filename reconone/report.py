@@ -862,7 +862,37 @@ def render_handoff(report: dict) -> str:
     return "\n".join(lines)
 
 
-def write_all(report: dict, out_dir: str) -> dict:
+def request_rows(session) -> list[dict]:
+    """The request ledger: what this scan actually sent, one row per attempt.
+
+    Two deliberate choices:
+
+    * Timings (`ms`, `wait_ms`) are **not** included. They differ between two scans of an
+      unchanged site, and this file is hashed in the manifest — carrying them would turn
+      "same target, same package" into a false claim.
+    * Rows are sorted by `(method, url, status, error)`, not by dispatch order. JS bundles are
+      fetched concurrently, so the order requests leave the process is scheduling noise, not a
+      fact about the target. Sorting is what makes two identical scans produce identical bytes;
+      re-scanning the same target with the same findings still gives the same file.
+    """
+    rows: list[dict] = []
+    for entry in getattr(session, "log", []) or []:
+        row = {"method": str(entry.get("method") or "GET"),
+               "url": scrub_urls([str(entry.get("url") or "")])[0],
+               "status": int(entry.get("status") or 0)}
+        if entry.get("egress"):
+            row["egress"] = str(entry["egress"])
+        if entry.get("error"):
+            row["error"] = str(entry["error"])
+        elif entry.get("first_error"):
+            # A fallback dispatch: we dialled twice, and the file must say so.
+            row["error"] = "fallback-after:" + str(entry["first_error"])
+        rows.append(row)
+    rows.sort(key=lambda row: (row["method"], row["url"], row["status"], row.get("error", "")))
+    return [dict(n=index, **row) for index, row in enumerate(rows, 1)]
+
+
+def write_all(report: dict, out_dir: str, requests=None) -> dict:
     # The package root is the directory that *contains* report/ and raw/. Normalising here
     # means manifest paths are always relative to the run directory, even if a caller hands
     # us the package subdirectory or a path with a trailing separator.
@@ -893,6 +923,13 @@ def write_all(report: dict, out_dir: str) -> dict:
     with open(os.path.join(report_dir, "hypotheses.jsonl"), "w", encoding="utf-8", newline="\n") as fh:
         for hypothesis in report["hypotheses"]:
             fh.write(json.dumps(hypothesis, ensure_ascii=False) + "\n")
+    # The request ledger, when the caller has a session to read. Written before the manifest
+    # walk below so it is listed (and hashed) like every other artifact.
+    if requests is not None:
+        with open(os.path.join(report_dir, "requests.jsonl"), "w", encoding="utf-8",
+                  newline="\n") as fh:
+            for row in requests:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     # Only this run's artifacts belong in the manifest. Walking out_dir blindly would pull in
     # stale raw/js and raw/maps from a previous scan into the same --out directory, which breaks
     # the "same target, same manifest" promise without changing deterministic_digest.

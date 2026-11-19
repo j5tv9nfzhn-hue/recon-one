@@ -36,7 +36,7 @@ cd recon-one
 python -m reconone doctor                     # 先确认 httpx/anyio/ssl/dns 真的能用（1 秒，不联网）
 python -m reconone ui                         # 启动 Web 控制台（前后端同一进程）
 python -m reconone scan --domain example.com --profile default   # 纯命令行
-python -m unittest discover -s tests -t .     # 243 项测试（全部本地、不联网）
+python -m unittest discover -s tests -t .     # 244 项测试（全部本地、不联网）
 ```
 
 常用开关（`scan`）：`--no-js` 不下载前端 bundle、`--no-intel` 关闭被动情报、`--geo` 查 IP 地理位置、
@@ -186,6 +186,7 @@ runs/<domain>/
   report/endpoints.jsonl    # 流式，便于 grep/jq
   report/findings.jsonl
   report/hypotheses.jsonl
+  report/requests.jsonl     # 请求台账：本次真正发出的每个请求（method/url/status/egress）
   raw/js/<sha16>.js         # 原始 bundle（密钥原文仅存在于此）
   raw/js/<sha16>.pretty.js  # 换行后的可读版本
   raw/maps/*.map            # source map 原文
@@ -217,7 +218,7 @@ runs/<domain>/
 
 ## 4. 验收标准
 
-完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。24 条验收项由测试断言。当前全仓 **243 tests OK**（`test_pipeline` 69 / `test_concurrency` 11 / `test_web` 17 / `test_intel` 19 / `test_triage` 11 / `test_doctor` 5 / `test_redaction` 28 / `test_egress` 16 / `test_verify` 10 / `test_session` 34 / `test_cookies` 23），`python -m unittest discover -s tests -t .` 可直接复现。
+完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。25 条验收项由测试断言。当前全仓 **244 tests OK**（`test_pipeline` 70 / `test_concurrency` 11 / `test_web` 17 / `test_intel` 19 / `test_triage` 11 / `test_doctor` 5 / `test_redaction` 28 / `test_egress` 16 / `test_verify` 10 / `test_session` 34 / `test_cookies` 23），`python -m unittest discover -s tests -t .` 可直接复现。
 
 ## 5. 已知限制
 
@@ -229,7 +230,8 @@ runs/<domain>/
   保留原始字节用于复核（见 [SECURITY.md](SECURITY.md)）；交付时只给 `report/`，或先删 `raw/`。
 - **无渲染引擎**：不执行 JS，纯静态分析。SPA 的动态接口只能通过 bundle 字面量与 source map 获得。
 - **技术指纹**为规则匹配，会误报（例如同源 CDN 头）。
-- **GraphQL introspection** 属主动探测，可用 `--no-graphql` 关闭。
+- **GraphQL introspection** 属主动探测（**是 POST**），可用 `--no-graphql` 关闭；`--no-verify` 只停验证阶段，
+  不会停它。请求台账如实记录方法，所以"这次到底发了什么"可核对。
 - **eTLD+1** 内置简化规则，未加载 public suffix list。
 - 端点方法推断（`GET?`）来自邻近上下文，置信度低于规范来源。
 - **被动情报依赖第三方可用性**：crt.sh 实测长期 502，故 CertSpotter 为主、crt.sh 为回退；Wayback 可能超时。

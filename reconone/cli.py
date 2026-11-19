@@ -270,7 +270,7 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
                                    verifymod.build_roe(domain, allow_external, 0, enabled=False,
                                                        source="skipped:unreachable")),
         )
-        reportmod.write_all(report, out_dir)
+        reportmod.write_all(report, out_dir, requests=reportmod.request_rows(session))
         return report, 3
 
     root_url = web.get("final_url") or web.get("root_url")
@@ -377,7 +377,7 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
     brief_path = os.path.join(out_dir, "report", "brief.md")
     with open(brief_path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(briefmod.build_brief(report, report_dir=os.path.abspath(out_dir)))
-    reportmod.write_all(report, out_dir)
+    reportmod.write_all(report, out_dir, requests=reportmod.request_rows(session))
     emit("report", f"报告已写出：{os.path.join(out_dir, 'report')}", out_dir=out_dir)
     if on_event is not None:
         on_event({"stage": "done", "message": "扫描完成", "progress": 100})

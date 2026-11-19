@@ -104,7 +104,7 @@ recon-one/
 
 | 文件 | 项数 | 覆盖 |
 |---|---|---|
-| `tests/test_pipeline.py` | 68 | 扫描、评分、判定、请求体提取、确定性、传输加固、DNS 应答校验、`--no-js` 模式的端点来源与画像注入 |
+| `tests/test_pipeline.py` | 70 | 扫描、评分、判定、请求体提取、确定性（含**请求台账逐行一致**）、传输加固、DNS 应答校验、`--no-js` 模式的端点来源与画像注入、**AC25 请求台账完整性与 manifest 哈希** |
 | `tests/test_concurrency.py` | 11 | 并发与串行同序同结果、共享字节预算、并发度上限 |
 | `tests/test_web.py` | 17 | 令牌一次性、弱密码拒绝、存储边界、CSRF、匿名 GET 拒绝、读取时重算、会话持久化、产物增删查、多目标批次、对比接口 |
 | `tests/test_intel.py` | 19 | CT 只留目标域、CertSpotter 失败回退 crt.sh、失败折叠成 `status`、存档路径与敏感路径、geo/CVE 默认关闭、站点类型规则、**重试吞掉一次 502**、**子域落地成 `probed:false` 资产**、digest 排除运行遥测 |
@@ -115,7 +115,7 @@ recon-one/
 | `tests/test_verify.py` | 10 | 轻量验证：可用/不可用判定、破坏性路径跳过、预算上限、越界请求被作用域守卫拦下并记录、禁用时零请求、只发 GET、RoE 序列化、TLS 证书探测走 CONNECT |
 | `tests/test_session.py` | 34 | 会话注入到达服务端（含重定向）、注入头大小写无关覆盖、`describe()` 不含凭据值且裸 Cookie 只计数、`secrets()` 只登记 ≥6 字符值并按长度降序、`RECONONE_*`、`--header` 语法校验、逐 host 独立限速、`Retry-After` 与指数退避封顶、成功重置、等待上限与预算收缩、真实 429 退避、整包产物零凭据 |
 | `tests/test_cookies.py` | 23 | Set-Cookie 会话保持三层：jar 规则（`Domain`/`Path`/`Secure`/过期/删除/上限、`.com` 与跨域声明拒收、IP 目标不接受 `Domain`、头部顺序稳定）、接线（第二跳自动带 cookie、`--cookie` 同名优先、只发一个 `Cookie` 头、关闭后不发）、端到端（`/app/inner` 由 401 变 200、`meta.session.cookies` 只有名称与计数、整包无 cookie 值、markdown 声明、`use_cookies=False`） |
-| **合计** | **243** | `python -m unittest discover -s tests -t .` 全绿（约 77s） |
+| **合计** | **244** | `python -m unittest discover -s tests -t .` 全绿（约 130s，被动情报超时占大头） |
 
 新增的关键回归：
 
@@ -227,3 +227,21 @@ brief 增加一行摘要；`digest` 排除这两块——「带了谁、跑多�
 值只在内存里活一次扫描。`tests/test_cookies.py` 跑一个**只对持 cookie 者**开放 `/app/inner` 的靶站：
 断言该页 200（否则会是 401）、`--cookie` 优先、只发一个 `Cookie` 头、整包文件无 cookie 值、
 markdown 写明会话保持、`use_cookies=False` 时不存不发。
+
+### 6.3 请求台账：从"只有计数"到"逐条可核"（2026-11）
+
+审查指出报告只有 `meta.requests` 计数，客户问"你们碰过 `/admin/delete` 吗"答不出。现在每次扫描写
+`report/requests.jsonl`：一行一个真实发出的请求，字段 `n / method / url / status / egress / error`。
+
+两个刻意的取舍：
+
+* **不含 `ms` 与 `wait_ms`**。它们每次扫描都不同，而这份文件进 `manifest.json` 带 sha256——
+  写进去就等于把"同目标同包"变成假话。
+* **按 `(method, url, status, error)` 排序后编号**，不按发起顺序。JS 是并发抓的，谁先出门是调度噪声，
+  不是关于目标的事实；排序才能让两次相同扫描产出同一份文件（实测三次运行哈希一致）。
+
+实测抓到的真事：台账里出现了 **POST**——GraphQL introspection。此前"只发 GET"的说法只对验证阶段成立，
+台账把这条口误纠正了（README 已知限制已写明）。
+
+测试：`test_ac25_request_ledger_is_complete_and_listed`（字段白名单、编号连续、根 URL 在册、
+manifest 里是真实 sha256 而非 `redacted`）+ `test_ac14_determinism` 里追加"两次扫描台账逐行一致"。
