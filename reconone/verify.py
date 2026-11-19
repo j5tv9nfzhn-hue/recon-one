@@ -296,14 +296,38 @@ def run(session, base_url: str, endpoints: list[dict], roe: RoE, anon_session=No
 
 
 def annotate(endpoints: list[dict], verification: dict) -> None:
-    """Stamp `verified` (+ `authz_open` when known) so every consumer shares one field."""
-    by_path = (verification or {}).get("by_path") or {}
-    authz = (verification or {}).get("authz_by_path") or {}
+    """Stamp `verified` and `authz_open` so every consumer shares one meaning.
+
+    `verified` answers "does the path exist?" — 401/403 is still evidence of existence.
+    `authz_open` answers a different question: "is it reachable *without* credentials?"
+    It is only stamped when that question has an answer:
+
+    * single identity — the scan itself was anonymous, so a 2xx/3xx status is open and
+      401/403/405/429 is not. "usable" alone must never be read as "open";
+    * dual identity — only `label == "anonymous_open"` counts. `same` (identical answers
+      with and without the credential) and `gated` do not; an unclassified pair stays
+      undecided instead of being assumed open.
+    """
+    verification = verification or {}
+    by_path = verification.get("by_path") or {}
+    authz = verification.get("authz_by_path") or {}
+    dual = str((verification.get("summary") or {}).get("identity_model") or "single") == "dual"
+    results = {str(entry.get("path") or ""): entry
+               for entry in verification.get("results") or []}
     for endpoint in endpoints or []:
         path = endpoint.get("path") or ""
         verdict = by_path.get(path)
         if verdict:
             endpoint["verified"] = verdict
-        block = authz.get(path)
-        if block:
-            endpoint["authz_open"] = bool(block.get("anon_open"))
+        if dual:
+            block = authz.get(path)
+            if block:
+                label = str(block.get("label") or "")
+                if label in ("anonymous_open", "gated", "same"):
+                    endpoint["authz_open"] = label == "anonymous_open"
+            continue
+        entry = results.get(path)
+        if entry is not None:
+            status = int(entry.get("status") or 0)
+            if status > 0:
+                endpoint["authz_open"] = 200 <= status < 400

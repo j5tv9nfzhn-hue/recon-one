@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import anyio
 import httpx
@@ -56,7 +56,24 @@ def _cancelled(cancel) -> bool:
     return bool(is_set()) if callable(is_set) else False
 
 
-def _headers(session, extra: dict | None) -> dict:
+def _needs_serial(session) -> bool:
+    """Does the run carry state the httpx fast path cannot reproduce?
+
+    Proxy routing (especially SOCKS5) and pacing are implemented in `http.Session`, not in
+    httpx. When either is active, correctness wins: run the batch through `session.request`
+    so the request cannot silently take a different route or ignore `--rate`.
+    """
+    egress = getattr(session, "egress", None)
+    if egress is not None and (egress.proxy is not None or egress.fallback is not None):
+        return True
+    limiter = getattr(session, "limiter", None)
+    if limiter is not None and (getattr(limiter, "rate", 0) > 0 or limiter.throttled > 0):
+        return True
+    return False
+
+
+def _request_headers(session, url: str, extra: dict | None) -> dict:
+    """Same header contract as `Session._attempt`: injected identity + jar, one Cookie."""
     hdrs = {
         "User-Agent": session.user_agent,
         "Accept": "*/*",
@@ -64,12 +81,23 @@ def _headers(session, extra: dict | None) -> dict:
     }
     if extra:
         hdrs.update(extra)
+    hdrs = session.injection.apply(hdrs)
+    parts = urlsplit(url)
+    cookie = session._cookie_header(parts.hostname or "", parts.path or "/",
+                                    parts.scheme == "https", hdrs)
+    hdrs = {name: value for name, value in hdrs.items() if name.lower() != "cookie"}
+    if cookie:
+        hdrs["Cookie"] = cookie
     return hdrs
 
 
 async def _one(client, session, budget_lock, url, method, data, headers, max_bytes):
-    """单个 URL。返回 (url, Response)。异常一律转成带原因的 Response，绝不外抛。"""
-    # 规则 1：闸门在前
+    """单个 URL（含重定向链）。返回 (url, Response)。异常一律转成带原因的 Response。
+
+    这条路径与 `Session.request` 保持同一套纪律：作用域先于请求、注入头与 cookie jar、
+    逐 host 限速、重定向每一跳都过作用域、预算原子预占、失败也写台账。
+    代理/限速场景由 `_needs_serial()` 直接交回串行路径，避免 httpx 走出另一条路由。
+    """
     if not session.in_scope(url):
         session.off_scope_attempts.append(url)
         return url, Response(url, error="out_of_scope: blocked by policy")
@@ -84,36 +112,79 @@ async def _one(client, session, budget_lock, url, method, data, headers, max_byt
         grant = min(limit, room)
         session.reserved_bytes = getattr(session, "reserved_bytes", 0) + grant
         limit = grant
-    started = time.time()
+
+    current = url
+    current_method = method
+    current_data = data
+    chain: list[str] = []
+    total_read = 0
+    hop_started = time.time()
     try:
-        async with client.stream(method, url, content=data, headers=_headers(session, headers)) as resp:
-            chunks, total = [], 0
-            async for chunk in resp.aiter_bytes():
-                total += len(chunk)
-                if total >= limit:
-                    chunks.append(chunk[: max(0, limit - (total - len(chunk)))])
-                    break
-                chunks.append(chunk)
-            body = b"".join(chunks)
-            elapsed = int((time.time() - started) * 1000)
-            hdrs = {k.lower(): v for k, v in resp.headers.items()}
-            # 规则 2：预算累加必须原子
-            async with budget_lock:
-                session.reserved_bytes = max(0, getattr(session, "reserved_bytes", 0) - grant)
-                session.requests += 1
-                session.bytes_total += len(body)
-                if session.bytes_total >= session.max_total_bytes:
-                    session.exhausted = True
-                session.log.append({"url": url, "status": resp.status_code,
-                                    "bytes": len(body), "ms": elapsed, "method": method})
-            return url, Response(url, resp.status_code, hdrs, body, elapsed,
-                                 truncated=total >= limit)
+        for _hop in range(6):
+            if not session.in_scope(current):
+                session.off_scope_attempts.append(current)
+                return current, Response(current, error="out_of_scope: blocked by policy")
+            if total_read >= limit:
+                return current, Response(current, error="budget_exhausted: redirect chain "
+                                                       "exceeded the byte cap")
+            parts = urlsplit(current)
+            host = parts.hostname or ""
+            secure = parts.scheme == "https"
+            hop_started = time.time()
+            waited = session.limiter.before(host, deadline=session.deadline)
+            async with client.stream(current_method, current, content=current_data,
+                                     headers=_request_headers(session, current, headers)) as resp:
+                remaining = max(0, limit - total_read)
+                chunks, total = [], 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total >= remaining:
+                        chunks.append(chunk[: max(0, remaining - (total - len(chunk)))])
+                        break
+                    chunks.append(chunk)
+                body = b"".join(chunks)
+                total_read += len(body)
+                elapsed = int((time.time() - hop_started) * 1000)
+                resp_headers = {k.lower(): v for k, v in resp.headers.items()}
+                cookies = [value for name, value in resp.headers.multi_items()
+                           if name.lower() == "set-cookie"]
+                if cookies:
+                    session.cookies.store(host, parts.path or "/", secure, cookies)
+                session.limiter.after(host, resp.status_code, resp_headers)
+                # 规则 2：预算累加必须原子
+                async with budget_lock:
+                    session.requests += 1
+                    session.bytes_total += len(body)
+                    if session.bytes_total >= session.max_total_bytes:
+                        session.exhausted = True
+                    session.log.append({
+                        "url": current, "status": resp.status_code, "bytes": len(body),
+                        "ms": elapsed, "method": current_method, "egress": "direct",
+                        "wait_ms": int(waited * 1000),
+                    })
+                chain.append(current)
+                location = resp_headers.get("location")
+                if resp.status_code in (301, 302, 303, 307, 308) and location:
+                    nxt = urljoin(current, location)
+                    if resp.status_code == 303:
+                        current_method, current_data = "GET", None
+                    current = nxt
+                    continue
+                return current, Response(current, resp.status_code, resp_headers, body, elapsed,
+                                         redirect_chain=chain,
+                                         truncated=total_read >= limit)
+        return current, session._fail(current, "redirect_limit", "more than 5 redirects")
     except Exception as exc:                       # 规则 3：只影响自己
+        kind = "timeout" if "timeout" in type(exc).__name__.lower() else "connect"
+        async with budget_lock:
+            session.requests += 1
+            session.log.append({"url": current, "status": 0, "bytes": 0,
+                                "ms": int((time.time() - hop_started) * 1000),
+                                "method": current_method, "egress": "direct", "error": kind})
+        return current, session._fail(current, kind, f"{type(exc).__name__}: {exc}")
+    finally:
         async with budget_lock:
             session.reserved_bytes = max(0, getattr(session, "reserved_bytes", 0) - grant)
-            session.requests += 1
-        kind = "timeout" if "timeout" in type(exc).__name__.lower() else "connect"
-        return url, session._fail(url, kind, f"{type(exc).__name__}: {exc}")
 
 
 async def _gather(session, jobs, degree, cancel):
@@ -126,6 +197,9 @@ async def _gather(session, jobs, degree, cancel):
         timeout=timeout,
         verify=session.verify_tls,
         follow_redirects=False,          # 重定向由调用方决定，与串行路径保持一致
+        # Egress is `Session`'s job. Environment proxies here would silently contradict
+        # `--direct`/`--proxy`; the caller falls back to the serial path when a proxy is set.
+        trust_env=False,
         limits=httpx.Limits(max_connections=degree, max_keepalive_connections=degree),
     ) as client:
         async def run(idx, job):
@@ -143,29 +217,36 @@ async def _gather(session, jobs, degree, cancel):
     return results
 
 
+def _serial(session, jobs) -> list[Response]:
+    return [session.request(j["url"], method=j.get("method", "GET"), data=j.get("data"),
+                            headers=j.get("headers"), max_bytes=j.get("max_bytes"),
+                            follow=j.get("follow", True))
+            for j in jobs]
+
+
 def fetch_many(session, jobs, degree: int = DEFAULT_PARALLEL, cancel=None) -> list[Response]:
     """并行抓取，返回与 `jobs` **同序**的 Response 列表。
 
     同序是刻意的：报告里的端点顺序不能因为并发而抖动，否则两次扫描的 diff
     全是噪音，也没法用「逐字段相同」来验证并发化的正确性。
+
+    代理与限速启用时退回串行：那条路径的每一条纪律（CONNECT/SOCKS5、`Retry-After`）
+    由 `Session` 实现，httpx 快速路径不会替我们遵守。
     """
     if not jobs:
         return []
+    if _needs_serial(session):
+        return _serial(session, jobs)
     degree = parallel_degree(session, degree)
     if degree <= 1:
-        return [session.request(j["url"], method=j.get("method", "GET"), data=j.get("data"),
-                                headers=j.get("headers"), max_bytes=j.get("max_bytes"),
-                                follow=j.get("follow", True))
-                for j in jobs]
+        return _serial(session, jobs)
 
     try:
         import asyncio
         results = asyncio.run(_gather(session, jobs, degree, cancel))
     except RuntimeError:
         # 已经在事件循环里（被别的异步宿主调用）—— 退回串行，结果形状不变
-        return [session.request(j["url"], method=j.get("method", "GET"), data=j.get("data"),
-                                headers=j.get("headers"), max_bytes=j.get("max_bytes"))
-                for j in jobs]
+        return _serial(session, jobs)
     return [results.get(i) or Response(j["url"], error="not_executed: worker did not run")
             for i, j in enumerate(jobs)]
 

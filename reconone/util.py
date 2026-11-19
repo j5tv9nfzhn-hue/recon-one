@@ -220,11 +220,37 @@ def registrable_domain(host: str) -> str:
     return ".".join(labels[-2:])
 
 
+def host_part(value: str) -> str:
+    """Host part of a target that may be `host:port`, `[v6]:port`, or a bare literal.
+
+    One definition for scope checks, cookie scopes and "is this an IP" decisions. Splitting
+    on `:` alone was wrong for `[::1]:8443`; treating any `:` as "IP" was wrong for
+    `example.com:8443` (a host name with a port is not an address).
+    """
+    text = str(value or "").strip().lstrip(".").lower()
+    if text.startswith("["):
+        return text[1:].split("]", 1)[0]
+    if text.count(":") == 1:
+        return text.split(":", 1)[0]
+    return text
+
+
+def is_ip_literal(value: str) -> bool:
+    """True only for an actual IP address, never for `example.com:8443`."""
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(host_part(value))
+        return True
+    except ValueError:
+        return False
+
+
 def in_scope(host: str, domain: str) -> bool:
     # a target may be given as host:port; scope is always compared on the host part
-    host = (host or "").lower().split(":")[0]
-    domain = (domain or "").lower().split(":")[0]
-    return host == domain or host.endswith("." + domain)
+    host = host_part(host)
+    domain = host_part(domain)
+    return bool(host and domain) and (host == domain or host.endswith("." + domain))
 
 
 def norm_endpoint(path: str) -> str:

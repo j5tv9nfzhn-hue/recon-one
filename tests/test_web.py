@@ -186,10 +186,11 @@ class TestServer(unittest.TestCase):
             "assets": {"http": {"headers": {}}}, "endpoints": [], "parameters": [],
             "specs": [], "graphql": [], "findings": [], "hypotheses": [], "errors": [],
             "secrets": [],
-            # A hand-written profile must pass through untouched: only `score` is recomputed.
-            "profile": {"axes": {"worth": {"score": 42.0}, "hardness": {"score": 60.0}},
-                        "success": {"index": 33, "band": "moderate", "label": "机会窗口一般"},
-                        "weights": {"observed_share_pct": 75.0}},
+            # A hand-written profile must NOT pass through: score/profile/bet are all
+            # recomputed on read, so a stale conclusion cannot survive because it is on disk.
+            "profile": {"axes": {"worth": {"score": 3.0}, "hardness": {"score": 97.0}},
+                        "success": {"index": 7, "band": "low", "label": "旧结论"},
+                        "weights": {"observed_share_pct": 1.0}},
         }
         with open(os.path.join(run, "report", "report.json"), "w", encoding="utf-8") as fh:
             json.dump(payload, fh)
@@ -198,12 +199,14 @@ class TestServer(unittest.TestCase):
         self.assertEqual(status, 200)
         data = json.loads(body)
         row = next(r for r in data["runs"] if r["run"] == "cmp.example")
-        self.assertEqual(row["worth"], 42.0)
-        self.assertEqual(row["ease"], 40.0, "易度 = 100 - 难度")
-        self.assertEqual(row["index"], 33)
-        self.assertEqual(row["band"], "moderate")
+        self.assertNotEqual(row["worth"], 3.0, "旧 profile 不得借缓存还魂")
+        self.assertNotEqual(row["index"], 7)
+        if row["hardness"] is not None:
+            self.assertEqual(row["ease"], round(100.0 - row["hardness"], 1),
+                             "易度 = 100 - 难度（按重算后的难度）")
         self.assertEqual(row["counts"]["endpoints"], 4)
-        self.assertEqual(row["observed_share_pct"], 75.0)
+        self.assertEqual(row["bet"], "withheld", "没有验证证据的旧报告只能 withheld")
+        self.assertEqual(row["verdict"], "证据不足")
         self.assertEqual(data["axes"], ["worth", "ease", "index"])
         self.assertTrue(data["note"])
         self.assertFalse(row["error"])
@@ -241,7 +244,12 @@ class TestServer(unittest.TestCase):
 
         status, body, _ = _get(self.base + "/api/report", headers={"Cookie": cookie})
         self.assertEqual(status, 200)
-        triage = json.loads(body)["score"]["triage"]
+        payload = json.loads(body)
+        triage = payload["score"]["triage"]
+        # score, profile and bet are all derived; none may be read back from disk.
+        self.assertIn("profile", payload)
+        self.assertIn("bet", payload)
+        self.assertEqual(payload["bet"]["verdict"], "withheld")
         # The old verdict must never be echoed back, whatever the new score computes.
         self.assertNotEqual(triage["verdict"], "low-yield")
         self.assertNotIn("酌情放弃", triage.get("label", ""))

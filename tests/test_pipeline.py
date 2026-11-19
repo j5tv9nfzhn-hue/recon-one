@@ -43,6 +43,82 @@ class UnitTests(unittest.TestCase):
         self.assertIn('"x;y"', out)
         self.assertGreater(out.count("\n"), 1)
 
+    @staticmethod
+    def _js_analyze_with(responses, urls, exhausted=False):
+        class _Resp:
+            def __init__(self, body=b"", status=200, error=None):
+                self.body, self.status, self.error = body, status, error
+
+            def text(self):
+                return self.body.decode("utf-8", "replace")
+
+        class _Sess:
+            def __init__(self):
+                self.exhausted = exhausted
+                self.requests = 0
+
+            def request(self, url, **kwargs):
+                self.requests += 1
+                body, status, error = responses[url]
+                return _Resp(body, status, error)
+
+        out = tempfile.mkdtemp(prefix="recon-js-")
+        return jsanalyze.analyze(_Sess(), urls, [], "example.com", out), out
+
+    def test_a_404_script_is_failed_not_a_budget_cut(self):
+        url = "https://example.com/missing.js"
+        result, out = self._js_analyze_with({url: (b"not found", 404, None)}, [url])
+        try:
+            self.assertEqual(result["stats"]["failed"], 1)
+            self.assertFalse(result["stats"]["budget_cut"])
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_an_exhausted_budget_sets_budget_cut(self):
+        result, out = self._js_analyze_with({}, ["https://example.com/a.js"], exhausted=True)
+        try:
+            self.assertTrue(result["stats"]["budget_cut"])
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_a_failed_request_appears_in_the_ledger(self):
+        """The ledger answers "what did you send", including attempts with no HTTP status."""
+        import socket
+
+        from reconone.http import Session
+
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        session = Session("127.0.0.1", timeout=1)
+        response = session.request(f"http://127.0.0.1:{port}/never-answered")
+        self.assertIsNotNone(response.error)
+        rows = reportmod.request_rows(session)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["method"], "GET")
+        self.assertEqual(rows[0]["status"], 0)
+        self.assertIn(f"127.0.0.1:{port}", rows[0]["url"])
+        self.assertTrue(rows[0]["error"])
+
+    def test_verification_targets_are_ordered_by_testability(self):
+        """The capped verification budget must go to parameterised/write endpoints first."""
+        from reconone.cli import _verification_targets
+
+        js = {"endpoints": [
+            {"path": "/about", "methods": ["GET"], "params": [], "confidence": "high"},
+            {"path": "/api/orders", "methods": ["POST"], "params": ["id"], "confidence": "high"},
+            {"path": "/api/list", "methods": ["GET"], "params": ["q"], "confidence": "low"},
+        ]}
+        api = {"specs": [{"endpoints": [
+            {"path": "/api/orders", "methods": ["GET"], "params": ["tenant"],
+             "confidence": "high", "evidence": [{"file": "spec"}]},
+        ]}]}
+        targets = _verification_targets(js, api)
+        self.assertEqual([t["path"] for t in targets], ["/api/orders", "/api/list", "/about"])
+        self.assertEqual(targets[0]["params"], ["id", "tenant"],
+                         "同一路径的 JS 与 spec 参数必须合并，且只消耗一次预算")
+
     def test_dns_wire_roundtrip(self):
         packet = _build_query("example.com", 16, 0x1234)
         self.assertEqual(packet[0:2], b"\x12\x34")
@@ -107,6 +183,39 @@ class FixtureScan(unittest.TestCase):
         self.assertIn("/api/v1/login", paths)
         self.assertTrue(any("graphql" in p for p in paths), paths)
 
+    def test_ac32_uncertainty_block_ranks_the_next_actions(self):
+        unc = self.report["uncertainty"]
+        self.assertFalse(unc["is_probability"])
+        self.assertIn("parameterised_checked_pct", unc["facts"])
+        self.assertTrue(unc["next_actions"], "值得打时至少要有确认动作")
+        self.assertTrue(unc["verdict_flips"], "判决必须给出可改判路径")
+        with open(os.path.join(self.report_dir, "handoff.md"), encoding="utf-8") as fh:
+            self.assertIn("## 2.1 未知面与改判路径", fh.read())
+        with open(os.path.join(self.report_dir, "report.md"), encoding="utf-8") as fh:
+            self.assertIn("## 未知面与下一步", fh.read())
+
+    def test_ac31_content_discovery_is_bounded_and_evidence_backed(self):
+        disc = self.report["discovery"]
+        self.assertTrue(disc["enabled"])
+        self.assertEqual(disc["baseline"]["status"], 404, "fixture 的未知路径应返回 404")
+        self.assertGreaterEqual(disc["stats"]["present"], 1)
+        self.assertLessEqual(disc["stats"]["probed"], disc["policy"]["max_candidates"])
+        discovered = [e for e in self.data["endpoints"] if e.get("discovered")]
+        self.assertTrue(discovered, "发现的路径必须进入端点清单")
+        for endpoint in discovered:
+            self.assertEqual(endpoint["sources"], ["content-discovery"])
+            self.assertNotIn("authz_open", endpoint,
+                             "发现请求用的是本次身份，不能声称匿名开放")
+        with open(os.path.join(self.report_dir, "report.md"), encoding="utf-8") as fh:
+            self.assertIn("## 定向内容发现", fh.read())
+
+    def test_no_discovery_skips_the_stage(self):
+        out = os.path.join(self.tmp, "no-discovery")
+        report, _ = run_scan(self.target, out, "fast", {"max_pages": 3},
+                             use_dns=False, quiet=True, use_discovery=False)
+        self.assertFalse(report["discovery"]["enabled"])
+        self.assertEqual(report["coverage"]["probes"]["discovery"], "skipped")
+
     def test_ac4_openapi_parsed_and_merged(self):
         self.assertEqual(len(self.data["specs"]), 1)
         self.assertEqual(self.data["specs"][0]["endpoint_count"], 2)
@@ -124,6 +233,14 @@ class FixtureScan(unittest.TestCase):
         self.assertTrue(scripts)
         maps = os.listdir(os.path.join(self.out, "raw", "maps"))
         self.assertTrue(maps)
+
+    def test_a_missing_script_is_not_budget_truncation(self):
+        """A 404 bundle is a fetch failure, not a budget cut; it must not force `withheld`."""
+        self.assertEqual(self.data["coverage"]["counts"]["scripts_failed"], 1)
+        self.assertFalse(self.data["coverage"]["truncated"],
+                         "单个 404 脚本不得把扫描标记为截断")
+        self.assertEqual(self.report["bet"]["verdict"], "worth",
+                         "截断语义被误用时，判决会从 worth 掉成 withheld")
 
     def test_ac7_secret_redacted_in_report(self):
         self.assertGreaterEqual(self.data["coverage"]["counts"]["secrets"], 1)

@@ -243,6 +243,39 @@ class TestAnnotate(unittest.TestCase):
         self.assertEqual(endpoints[1]["verified"], "unusable")
         self.assertNotIn("verified", endpoints[2], "未验证的端点不应被错误标注")
 
+    def test_single_identity_openness_comes_from_status_not_from_usable(self):
+        """A 401 is "usable" (the path exists) but not "anonymous open"."""
+        paths = ["/ok", "/redirect", "/auth", "/denied", "/method", "/throttled"]
+        statuses = [200, 302, 401, 403, 405, 429]
+        verification = {
+            "summary": {"identity_model": "single"},
+            "by_path": {path: "usable" for path in paths},
+            "results": [{"path": path, "status": status, "verdict": "usable"}
+                        for path, status in zip(paths, statuses)],
+        }
+        endpoints = _endpoints(paths)
+        verifymod.annotate(endpoints, verification)
+        self.assertEqual([e.get("authz_open") for e in endpoints],
+                         [True, True, False, False, False, False])
+
+    def test_dual_identity_openness_requires_the_anonymous_open_label(self):
+        """`same` and `gated` are not exposure; an unclassified pair stays undecided."""
+        verification = {
+            "summary": {"identity_model": "dual"},
+            "by_path": {"/open": "usable", "/same": "usable", "/gated": "usable",
+                        "/unknown": "usable"},
+            "authz_by_path": {
+                "/open": {"label": "anonymous_open", "anon_open": True},
+                "/same": {"label": "same", "anon_open": True},
+                "/gated": {"label": "gated", "anon_open": False},
+                "/unknown": {"label": "unknown", "anon_open": False},
+            },
+        }
+        endpoints = _endpoints(["/open", "/same", "/gated", "/unknown"])
+        verifymod.annotate(endpoints, verification)
+        self.assertEqual([e.get("authz_open") for e in endpoints],
+                         [True, False, False, None])
+
 
 class TestTlsProbeUsesEgress(unittest.TestCase):
     """The certificate probe must leave through the proxy, not dial direct."""

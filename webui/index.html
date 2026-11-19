@@ -273,6 +273,7 @@
               <label class="check"><input type="checkbox" id="swIntel" checked><span>被动情报（CT / 存档）</span></label>
               <label class="check"><input type="checkbox" id="swGeo"><span>地理位置</span></label>
               <label class="check"><input type="checkbox" id="swCve"><span>CVE 线索</span></label>
+              <label class="check"><input type="checkbox" id="swDiscovery" checked><span>定向内容发现</span></label>
             </div>
           </div>
 
@@ -340,7 +341,7 @@
                   <th class="col-s">生成时间</th>
                   <th class="al-r col-n">端点</th>
                   <th class="al-r col-n">发现</th>
-                  <th class="col-s">结论</th>
+                  <th class="col-s">下注判决</th>
                   <th class="al-r col-w">大小</th>
                   <th class="al-r col-act">操作</th>
                 </tr>
@@ -434,6 +435,26 @@
             <p class="profile__note" id="profileNote"></p>
           </div>
 
+          <div class="card card--plain" id="discoveryCard" hidden>
+            <div class="card__head">
+              <h2 class="card__title">定向内容发现</h2>
+              <span class="tag tag--ghost" id="discoveryStatus"></span>
+            </div>
+            <p class="card__note" id="discoveryMeta"></p>
+            <ul class="verdict__acts" id="discoveryPaths"></ul>
+            <p class="card__note" id="discoveryNote"></p>
+          </div>
+
+          <div class="card card--plain" id="uncertaintyCard" hidden>
+            <div class="card__head">
+              <h2 class="card__title">未知面与下一步</h2>
+              <span class="tag tag--ghost" id="uncertaintyMeta"></span>
+            </div>
+            <p class="card__note" id="uncertaintyFacts"></p>
+            <ul class="verdict__acts" id="uncertaintyActions"></ul>
+            <p class="card__note" id="uncertaintyFlips"></p>
+          </div>
+
           <div class="card">
             <div class="card__head">
               <h2 class="card__title">端点风险分布</h2>
@@ -484,7 +505,7 @@
             </div>
           </div>
           <p class="card__note" id="compareNote">
-            列均按当前评分模型重算。<span class="mono">index</span> 为机会指数（非概率）。
+            列均按当前模型重算（score / profile / bet）。<span class="mono">index</span> 为机会指数（非概率）。
           </p>
           <p class="note note--warn" id="compareErr" role="alert" hidden></p>
           <p class="empty-state" id="compareLoading" hidden>正在读取产物…</p>
@@ -494,7 +515,8 @@
                 <tr>
                   <th>目标</th>
                   <th class="col-time">生成时间</th>
-                  <th class="col-verdict">结论</th>
+                  <th class="col-verdict">下注判决</th>
+                  <th class="al-r col-n">未知项</th>
                   <th class="al-r col-w">价值</th>
                   <th class="al-r col-w">易度</th>
                   <th class="al-r col-idx">机会指数</th>
@@ -529,6 +551,7 @@
         </div>
         <div class="stack" data-has-report hidden>
           <p class="view__note">按未通过优先排序。权重与得分均可复核，来源见每行「依据」。<span id="checksCount"></span></p>
+          <p class="view__note" id="scoreVerdictNote"></p>
           <div class="tablewrap">
             <table class="table">
               <thead>

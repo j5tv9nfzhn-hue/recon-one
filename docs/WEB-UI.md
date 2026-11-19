@@ -13,7 +13,7 @@ python -m reconone ui
 | 首次运行 | 在**启动它的控制台窗口**打印一次性令牌 `TKN-XXXX-XXXX-XXXX` |
 | 输入令牌 | 必须在同一页面立即设置密码（≥10 位，不能纯数字或纯字母，不能是常见弱口令） |
 | 令牌寿命 | 设置密码成功的那一刻，令牌从磁盘删除；再启动不会重新下发 |
-| 之后 | 仅密码登录，会话 Cookie 为 `HttpOnly; SameSite=Strict`，12 小时过期 |
+| 之后 | 仅密码登录，会话 Cookie 为 `HttpOnly; SameSite=Strict`，30 天过期 |
 | 密码存储 | PBKDF2-HMAC-SHA256，240 000 轮，每次安装独立 16 字节随机盐 |
 
 为什么令牌走控制台而不走文件：落盘令牌等于把「第一次进门」的凭证放到磁盘上，
@@ -41,14 +41,17 @@ recon-one/
 
 ## 3. 读取时重算（重要）
 
-`GET /api/report` **不相信磁盘上的 `score` 块**，每次都丢弃它并用当前模型重算。
+`GET /api/report` **不相信磁盘上的派生结论**，每次都丢弃它们并用当前模型重算：`score`、`profile`、
+`bet` 与 `uncertainty` 都从同一份证据重新计算；重算 `bet` 之前先用存储的 `verification` 重新
+`annotate()` 端点，避免旧报告的 `verified` 被当成 `authz_open`。`/api/compare` 与 `/api/runs` 同理。
 
 原因是一个真实事故：`free.ai` 的报告在磁盘上带着旧版判定
 「维护较好且成本不低，酌情放弃」。改动模型后，界面立刻从文件里读回了这条已经作废的结论 ——
-旧结论借着缓存文件还魂。任何评分系统在模型迭代期都会遇到这件事，唯一稳妥的做法是
+旧结论借着缓存文件还魂。任何评分/判决系统在模型迭代期都会遇到这件事，唯一稳妥的做法是
 **把派生物视为缓存，读取时重算**。
 
-对应回归测试：`tests/test_web.py::TestServer::test_report_is_rescored_on_read`。
+对应回归测试：`tests/test_web.py::TestServer::test_report_is_rescored_on_read` 与
+`test_compare_lists_every_run_with_three_decision_axes`（旧 profile/bet 不得原样返回）。
 
 ## 4. 安全边界
 
@@ -152,12 +155,14 @@ CapacityLimiter）。两者都在 `requirements.txt` 里，且是**硬依赖**�
 | 实时进度 | 单条自调度轮询：运行中 600ms、空闲 3s；同时取 `/api/state` 与 `/api/events?since=`，增量追加事件、更新总进度与每目标进度行。**不需要刷新页面**，批次结束后自动拉取报告与产物列表 | 浏览器实测 7%→17%→47%→85%→100%，目标行 `running → partial` |
 | 侧边栏导航 | 7 个视图（扫描/产物/概览/评分明细/端点/参数/日志）全部可进；切换走 `location.hash`（`#/runs`），刷新后停留在同一视图；没有报告时给出「去扫描」空态卡片，而不是禁用按钮 | 7 个视图逐一断言 `shown/active/hash/title` |
 | 视觉与交互 | 设计令牌（色彩/圆角/间距/动效）→ 组件；深色为默认、浅色同为一等公民；三套预设（Tangerine / Soft Pop / Brutalist）切换主色与圆角骨骼；`.view`/`.form`/`.app` 的 `display` 规则与 `[hidden]` 显式对齐 | 浏览器截图核对登录页、扫描页、产物页、概览页 |
-| 产物管理 | `GET /api/runs` 列表（目标/时间/端点/发现/结论/体积、当前产物高亮）、`POST /api/runs/select` 切换、`POST /api/runs/delete` 删除（二次确认 + 名字白名单 + 解析后仍在 runs 根下） | `tests/test_web.py::TestServer::test_runs_api_lists_selects_and_deletes` |
-| 多目标并行 | 一次提交最多 12 个目标；`ThreadPoolExecutor` 按 `RECONONE_TARGET_PARALLEL`（默认 4，上限 8）并行跑 `cli.run_scan`；每个目标独立 out_dir/进度/结论，聚合进度取均值 | `TestParallelTargets::test_batch_tracks_every_target` |
+| 产物管理 | `GET /api/runs` 列表（目标/时间/端点/发现/**下注判决**/体积、当前产物高亮）、`POST /api/runs/select` 切换、`POST /api/runs/delete` 删除（二次确认 + 名字白名单 + 解析后仍在 runs 根下）；列表读取时重算 `score/profile/bet` | `tests/test_web.py::TestServer::test_runs_api_lists_selects_and_deletes` |
+| 多目标并行 | 一次提交最多 12 个目标；`ThreadPoolExecutor` 按 `RECONONE_TARGET_PARALLEL`（默认 4，上限 8）并行跑 `cli.run_scan`；每个目标独立 out_dir/进度/**判决**，聚合进度取均值 | `TestParallelTargets::test_batch_tracks_every_target` |
+| 下注判决 | 概览首屏：值得打 / 不值 / 证据不足 + 两条判据 + 未知项 + 改判条件；数据取 `report.bet`，旧的 `score.triage` 结论移到「评分明细」旁注 | `test_web.py::test_report_is_rescored_on_read`、`test_compare_lists_every_run_with_three_decision_axes` |
+| 未知面与下一步 | 独立卡片：带参端点/子域覆盖率、未完成阶段、按影响×请求成本排序的前 5 个动作（含样本与动作说明）、改判路径；数据取 `report.uncertainty`，所有值走 textContent | `tests/test_uncertainty.py`、`test_pipeline.py::FixtureScan::test_ac32_uncertainty_block_ranks_the_next_actions` |
 | 免登录 | 首次令牌 → 设置一次密码；会话以 `sha256(sid)` 存 `state/sessions.json`，TTL 30 天，cookie 带 `Max-Age`；设置密码会清空既有会话 | `TestRememberedSessions` 4 项 |
 | 目标画像 | 概览视图顶部卡片：worth / hardness / 机会指数 + band + 覆盖率 + 类型/子域/地理/unknown 列表；数值直接取 `report.profile`，前端不二次计算 | `TestNoJsMode::test_profile_is_attached_and_says_what_is_unknown`、`tests/test_triage.py` |
 
-## 10. 画像卡片与四个开关（2026-11）
+## 10. 画像卡片与五个开关（2026-11）
 
 扫描页第二排的开关全部透传给 `cli.run_scan`，控制台不额外做任何推断：
 
@@ -167,6 +172,7 @@ CapacityLimiter）。两者都在 `requirements.txt` 里，且是**硬依赖**�
 | 被动情报（CT / 存档） | 开（`--no-intel` 关） | 关闭后不访问任何第三方 | `intel.ct / intel.archive` 为 `skipped`，`worth.subdomains / worth.archive_sensitive` 为 `unknown` |
 | 地理位置 | 关（`--geo` 开） | 开启后向 ip-api 查 IP 归属 | 开启才写 `intel.geo`，否则 `disabled` + 原因 |
 | CVE 线索 | 关（`--cve` 开） | 开启后按版本号查 NVD | 开启才写 `intel.cve`；没有版本号的产品不查询 |
+| 定向内容发现 | 开（`--no-discovery` 关） | JS/spec 前缀 + 技术栈路径 + 少量公共路径，逐条与**同目录前缀**的 404/soft-404 基线比对；上限按 profile | `report.discovery`（baseline/baselines/stats/rows），positive 行以 `content-discovery` 进端点清单但不声称匿名开放；关闭时 `coverage.probes.discovery=skipped` |
 
 卡片与 `report.md` 的「目标画像」一节、`report.json` 的 `profile` 用的是**同一份规则表输出**，
 所以三处数字永远一致；band 只用低彩度状态色，不引入新颜色。
@@ -182,14 +188,17 @@ CapacityLimiter）。两者都在 `requirements.txt` 里，且是**硬依赖**�
 | 三轴雷达 | JS 构造的 SVG：3 条轴（价值 / 易度 = 100−难度 / 机会指数）+ 25/50/75/100 网格环 | `profile.axes.worth.score`、`profile.axes.hardness.score`、`profile.success.index` | 任一轴为 `null` 时该轴画虚线 + 空心点并标 `—`，**不画成 0**；不足三轴时画开放折线而不是填充面 |
 | 端点风险分布 | 环形图 + 图例（首要 / 次要 / 清单） | `endpoints[].priority` | 无端点时显示「无端点（未探测或页面无链接）」并隐藏环形图 |
 | 情报落地 | 紧凑三块：子域列表（`source` + 「未探测」）、主动探测强度、依赖版本 | `assets.subdomains`、`meta.probe_stats`、`profile.weights.observed_share_pct`、`meta.deps` | 子域为空时显示 `profile.dimensions.subdomains.status` + `reason`（例如 IP 目标的 `disabled` 说明） |
+| 内容发现 | 独立卡片：状态、根基线、候选/探测/存在/受保护/不存在计数、前 8 条 positive 路径；被上限丢弃与截断都明写 | `discovery.status/baseline/baselines/stats/rows` | 未启用时整卡隐藏；基线被拦截/截断时显示原因，不把未探测当成不存在 |
+| 未知面 | 独立卡片：覆盖率、未完成阶段、排序后的下一步与改判路径 | `uncertainty.facts/next_actions/verdict_flips` | 无动作时整卡隐藏；操作覆盖率不足只写“未知”，不写成漏洞概率 |
 
 **可访问性**：雷达容器是 `role="img"` 且 `aria-label` 用一句话写出三个数字（含 withheld）；
 颜色不是唯一信息载体（数值文本始终存在）；`prefers-reduced-motion: reduce` 时关闭 160ms 淡入。
 
 **对比视图**（`#/compare`，侧栏「对比」）：进入时单次 `GET /api/compare`，表格列出目标、生成时间、
-结论、价值、易度、机会指数（带 band）、子域/端点/发现数、主动实测权重占比；每行「查看」调用
-`POST /api/runs/select` 后切回概览。空态给「去扫描」，接口失败在视图内显示错误文本，
-行级 `error` 渲染在结论列并禁用该行的「查看」——**不轮询**，也不把读不出来的产物当成 0 分。
+**下注判决**、未知项数、价值、易度、机会指数（带 band）、子域/端点/发现数、主动实测权重占比；每行「查看」调用
+`POST /api/runs/select` 后切回概览。`score/profile/bet` 都在服务端按当前模型重算，评分层标签保留为
+tooltip。空态给「去扫描」，接口失败在视图内显示错误文本，行级 `error` 渲染在判决列并禁用该行的
+「查看」——**不轮询**，也不把读不出来的产物当成 0 分。
 
 渲染实现全部走 `document.createElementNS` + 呈现属性 + CSS 类：CSP 是 `style-src 'self'`，
 所以没有任何内联 `<style>` / `style="…"`，文本一律 `textContent`。

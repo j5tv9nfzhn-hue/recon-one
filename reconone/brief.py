@@ -159,6 +159,18 @@ def build_brief(report: dict, budget: int = DEFAULT_BUDGET, report_dir: str = ""
                 criterion.get("status"), criterion.get("status"))
             detail = criterion.get("detail", "")
             b.add(f'  - `{criterion.get("rule")}`：{mark} — {detail}')
+    unc = report.get("uncertainty") or {}
+    if unc:
+        ufacts = unc.get("facts") or {}
+        actions = unc.get("next_actions") or []
+        top = actions[0] if actions else {}
+        b.add(f"- **未知面**：带参端点已判定 {ufacts.get('parameterised_answered', 0)}/"
+              f"{ufacts.get('parameterised_total', 0)}；子域已探 "
+              f"{ufacts.get('subdomains_probed', 0)}/{ufacts.get('subdomains_total', 0)}；"
+              f"下一步：{top.get('title') or '无'}（约 {top.get('cost_requests', 0)} 次请求）")
+        for flip in (unc.get("verdict_flips") or [])[:2]:
+            b.add(f"  - 改判路径 `{flip.get('from')}` → `{flip.get('to')}`："
+                  f"{flip.get('condition')}")
     # The brief is the one artefact a downstream agent is told to read first, so the
     # authorised-use line has to be in it: an agent that cannot see the constraint will
     # happily propose steps the operator is not allowed to take.
@@ -251,6 +263,12 @@ def build_brief(report: dict, budget: int = DEFAULT_BUDGET, report_dir: str = ""
           f"端点 {counts.get('endpoints',0)} 个 / 参数 {counts.get('parameters',0)} 个")
     b.add(f"- 前端密钥 {counts.get('secrets',0)} / API 规范 {counts.get('specs',0)} 份 / "
           f"GraphQL {counts.get('graphql',0)} 个 / source map {counts.get('sourcemaps',0)} 份")
+    disc = report.get("discovery") or {}
+    if disc.get("enabled"):
+        dstats = disc.get("stats") or {}
+        b.add(f"- 定向内容发现：候选 {dstats.get('candidates', 0)} / 探测 {dstats.get('probed', 0)}"
+              f" / 存在 {dstats.get('present', 0)} / 受保护 {dstats.get('gated', 0)}"
+              f"（基线 HTTP {(disc.get('baseline') or {}).get('status', 0)}）")
     ver = report.get("verification") or {}
     if ver:
         s = ver.get("summary") or {}

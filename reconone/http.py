@@ -268,7 +268,7 @@ class Session:
         return "; ".join([injected] + extra) if extra else injected
 
     def _attempt(self, url: str, method: str, data: bytes | None, headers: dict | None,
-                 max_bytes: int | None, proxy) -> Response:
+                 max_bytes: int | None, proxy, egress_label: str | None = None) -> Response:
         parts = urlsplit(url)
         scheme = (parts.scheme or "https").lower()
         host = parts.hostname or ""
@@ -309,7 +309,9 @@ class Session:
                 raw.read(2048)
                 self.requests += 1
                 self.log.append({"url": url, "status": raw.status, "bytes": 0, "ms": 0,
-                                 "method": method, "egress": "proxy", "error": "proxy-error"})
+                                 "method": method,
+                                 "egress": egress_label or ("proxy" if proxy else "direct"),
+                                 "error": "proxy-error"})
                 return self._fail(url, "proxy-error", f"proxy returned {raw.status}")
             cap = max_bytes or self.max_body
             body = raw.read(cap)
@@ -336,12 +338,22 @@ class Session:
                 self.exhausted = True
             self.log.append({"url": url, "status": raw.status, "bytes": len(body),
                              "ms": elapsed, "method": method, "wait_ms": int(waited * 1000),
-                             "egress": "proxy" if proxy else "direct"})
+                             "egress": egress_label or ("proxy" if proxy else "direct")})
             return Response(url, raw.status, resp_headers, body, elapsed, truncated=truncated,
                             header_list=header_list)
         except Exception as exc:                      # noqa: BLE001 - classified, never lost
+            kind = self._kind(exc)
             self.requests += 1
-            return self._fail(url, self._kind(exc), f"{type(exc).__name__}: {exc}")
+            # The ledger must answer "what did you actually send", including attempts that
+            # never got an HTTP status. Without this row a timed-out request existed only in
+            # `errors` (which has no method), so `meta.requests=1` and `requests.jsonl=[]`
+            # could both be true for the same run.
+            self.log.append({"url": url, "status": 0, "bytes": 0,
+                             "ms": int((time.time() - started) * 1000), "method": method,
+                             "wait_ms": int(waited * 1000),
+                             "egress": egress_label or ("proxy" if proxy else "direct"),
+                             "error": kind})
+            return self._fail(url, kind, f"{type(exc).__name__}: {exc}")
         finally:
             if conn is not None:
                 try:
@@ -368,9 +380,10 @@ class Session:
         if fallback is None or kind not in ("connect-timeout", "reset", "refused"):
             return resp
         self.fallback_count += 1
-        self.log.append({"url": url, "status": 0, "bytes": 0, "ms": 0, "method": method,
-                         "egress": "fallback", "first_error": kind})
-        retry = self._attempt(url, method, data, headers, max_bytes, fallback)
+        # One ledger row per real attempt: the failed primary was logged above, and the
+        # retry is labelled `fallback` so the package can prove it took the other route.
+        retry = self._attempt(url, method, data, headers, max_bytes, fallback,
+                              egress_label="fallback")
         if retry.error is not None:
             # Both routes failed. Keep the direct failure as the answer and record that the
             # fallback was tried; "two ways failed" must not read like "the target answered".

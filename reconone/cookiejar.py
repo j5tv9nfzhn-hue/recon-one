@@ -29,6 +29,8 @@ import time
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 
+from .util import host_part, is_ip_literal
+
 #: A site that sets one cookie per request must not grow this without bound. Oldest-first
 #: eviction keeps the header deterministic (dict order is insertion order).
 MAX_COOKIES = 200
@@ -84,12 +86,10 @@ def _parse_expires(raw: str) -> float | None:
 
 
 def _looks_like_ip(host: str) -> bool:
-    if not host:
-        return False
-    if ":" in host:
-        return True
-    parts = host.split(".")
-    return len(parts) == 4 and all(part.isdigit() for part in parts)
+    """`example.com:8443` is a host:port, not an IP literal."""
+    return is_ip_literal(host)
+
+
 def _normalise_domain(raw: str) -> str:
     return str(raw or "").strip().lstrip(".").lower()
 
@@ -100,7 +100,10 @@ class CookieJar:
     def __init__(self, enabled: bool = False, scope_domain: str = "",
                  max_cookies: int = MAX_COOKIES, clock=None):
         self.enabled = bool(enabled)
-        self.scope = _normalise_domain(scope_domain)
+        # A target may be `host:port`; the scope is the host part (same rule as the HTTP
+        # scope guard). Keeping the port here made `Domain=example.com` look out of scope
+        # for every `example.com:8443` scan.
+        self.scope = host_part(scope_domain)
         self._scope_is_ip = _looks_like_ip(self.scope)
         self.max_cookies = max(1, int(max_cookies))
         self.clock = clock or time.time
@@ -135,7 +138,7 @@ class CookieJar:
         were accepted. Rejections are counted, never silently dropped."""
         if not self.enabled:
             return 0
-        host = _normalise_domain(host)
+        host = host_part(host)
         default_path = _default_path(request_path)
         accepted = 0
         with self._lock:
@@ -207,7 +210,7 @@ class CookieJar:
         """The `Cookie` header value for one request, or `""`."""
         if not self.enabled:
             return ""
-        host = _normalise_domain(host)
+        host = host_part(host)
         now = self.clock()
         with self._lock:
             live = []

@@ -472,6 +472,7 @@
           use_intel: $("swIntel").checked,
           geo: $("swGeo").checked,
           cve: $("swCve").checked,
+          use_discovery: $("swDiscovery").checked,
           authorized_by: $("authorizedBy").value.trim(),
         },
       });
@@ -534,7 +535,9 @@
       tr.appendChild(el("td", "dim col-s", fmtWhen(r.generated_at, r.mtime)));
       tr.appendChild(el("td", "al-r col-n num", String((r.counts || {}).endpoints ?? "—")));
       tr.appendChild(el("td", "al-r col-n num", String((r.counts || {}).findings ?? "—")));
-      tr.appendChild(el("td", "dim col-s", r.verdict || "—"));
+      const verdictCell = el("td", "dim col-s", r.verdict || "—");
+      if (r.score_verdict) verdictCell.title = `评分层结论：${r.score_verdict}`;
+      tr.appendChild(verdictCell);
       tr.appendChild(el("td", "al-r col-w num", fmtBytes(r.bytes)));
 
       const act = el("td", "al-r col-act");
@@ -592,6 +595,8 @@
   /* ───────────────────────────── compare ───────────────────────────── */
 
   const BAND_LABEL = { high: "高", elevated: "偏高", moderate: "中", low: "低", unknown: "未定" };
+  const BET_LABEL = { worth: "值得打", not_worth: "不值", withheld: "证据不足" };
+  const BET_STATUS = { hit: "命中", miss: "未命中", unknown: "未判定" };
 
   const compareNumber = (value, width) => {
     const td = el("td", `al-r ${width} num`);
@@ -626,8 +631,16 @@
 
       const tdVerdict = el("td", "col-verdict");
       if (r.error) tdVerdict.appendChild(el("span", "cmp__err", r.error));
-      else tdVerdict.appendChild(el("span", "dim", r.verdict || "未评估"));
+      else {
+        const verdictText = el("span", "dim", r.verdict || "未评估");
+        if (r.score_verdict) verdictText.title = `评分层结论：${r.score_verdict}`;
+        tdVerdict.appendChild(verdictText);
+      }
       tr.appendChild(tdVerdict);
+
+      const tdUnknown = compareNumber(r.unknowns, "col-n");
+      if (r.next_action) tdUnknown.title = `下一步：${r.next_action}`;
+      tr.appendChild(tdUnknown);
 
       tr.appendChild(compareNumber(r.worth, "col-w"));
       tr.appendChild(compareNumber(r.ease, "col-w"));
@@ -688,7 +701,7 @@
     try {
       const data = await api("/api/compare");
       $("compareNote").textContent = data.note ||
-        "列均按当前评分模型重算。index 为机会指数（非概率）。";
+        "列均按当前模型重算（score / profile / bet）。index 为机会指数（非概率）。";
       renderCompare(data.runs || [], data.selected || "");
     } catch (e) {
       if (e.status === 401) { state.authed = false; renderGate(true); return; }
@@ -716,7 +729,7 @@
     ["pages", "页面"], ["scripts", "脚本"], ["endpoints", "端点"],
     ["endpoints_write", "写方法端点"], ["endpoints_testable", "可变异端点"],
     ["parameters", "参数"], ["sourcemaps", "source map"], ["secrets", "密钥"],
-    ["specs", "API 规范"], ["graphql", "GraphQL"],
+    ["specs", "API 规范"], ["graphql", "GraphQL"], ["discovered", "内容发现"],
   ];
   const ORDER = { fail: 0, warn: 1, unknown: 2, pass: 3 };
 
@@ -1029,6 +1042,77 @@
     $("intelDeps").textContent = parts.length ? `运行时 ${parts.join(" · ")}` : "运行时版本未记录";
   };
 
+  /* 定向内容发现：候选数、基线、存在/受保护路径。数据全部来自 report.discovery。 */
+  const renderDiscovery = (rep) => {
+    const card = $("discoveryCard");
+    const disc = rep.discovery || {};
+    if (!disc.enabled) {
+      card.hidden = true;
+      return;
+    }
+    card.hidden = false;
+    const stats = disc.stats || {};
+    const baseline = disc.baseline || {};
+    const statusLabel = {
+      ok: "完成", empty: "无候选", truncated: "预算截断",
+      "baseline-blocked": "基线被拦截", error: "错误",
+    };
+    $("discoveryStatus").textContent = statusLabel[disc.status] || disc.status || "";
+    $("discoveryMeta").textContent =
+      `候选 ${stats.candidates ?? 0} · 探测 ${stats.probed ?? 0} · 存在 ${stats.present ?? 0}`
+      + ` · 受保护 ${stats.gated ?? 0} · 不存在 ${stats.absent ?? 0}`
+      + (stats.skipped_by_baseline ? ` · 基线拦截跳过 ${stats.skipped_by_baseline}` : "")
+      + ` · 基线 HTTP ${baseline.status ?? 0}${baseline.soft_404 ? "（soft-404）" : ""}`;
+    const list = $("discoveryPaths");
+    list.replaceChildren();
+    const labels = { present: "存在", gated: "受保护" };
+    for (const row of (disc.rows || [])
+      .filter((r) => labels[r.label]).slice(0, 8)) {
+      list.appendChild(el("li", null,
+        `${row.path} — ${labels[row.label]}（HTTP ${row.status} · ${row.source}）`));
+    }
+    const notes = [];
+    if (disc.reason) notes.push(`未探测：${disc.reason}`);
+    if (stats.truncated) notes.push("预算/时间在候选耗尽前中断；未探测部分不是「不存在」。");
+    if (stats.dropped_by_cap) notes.push(`另有 ${stats.dropped_by_cap} 条候选被上限丢弃（不是不存在）。`);
+    $("discoveryNote").textContent = notes.join(" ");
+  };
+
+  /* 未知面与下一步：report.uncertainty 的排序动作，不是概率。 */
+  const renderUncertainty = (rep) => {
+    const card = $("uncertaintyCard");
+    const unc = rep.uncertainty || {};
+    const actions = unc.next_actions || [];
+    if (!actions.length) {
+      card.hidden = true;
+      return;
+    }
+    card.hidden = false;
+    const facts = unc.facts || {};
+    const pct = (v) => (v == null ? "—" : `${v}%`);
+    $("uncertaintyMeta").textContent =
+      `${unc.unknowns ? unc.unknowns.length : 0} 个未闭合项`;
+    $("uncertaintyFacts").textContent =
+      `带参端点已判定 ${facts.parameterised_answered ?? 0}/${facts.parameterised_total ?? 0}`
+      + `（${pct(facts.parameterised_checked_pct)}）· 子域已探 `
+      + `${facts.subdomains_probed ?? 0}/${facts.subdomains_total ?? 0}`
+      + `（${pct(facts.subdomains_checked_pct)}）`
+      + (facts.stages_incomplete?.length
+        ? ` · 未完成阶段 ${facts.stages_incomplete.join(", ")}` : "");
+    const list = $("uncertaintyActions");
+    list.replaceChildren();
+    for (const item of actions) {
+      const li = el("li", null,
+        `#${item.rank} ${item.title}（${item.impact} 影响，约 ${item.cost_requests} 次请求）`
+        + ` — ${item.action}`);
+      if (item.samples?.length) li.title = `样本：${item.samples.join("、")}`;
+      list.appendChild(li);
+    }
+    $("uncertaintyFlips").textContent = (unc.verdict_flips || [])
+      .map((flip) => `${flip.from} → ${flip.to}：${flip.condition}`)
+      .join("；");
+  };
+
   /* 目标画像：价值 / 难度 / 机会窗口。全部来自 report.profile，规则表计算，无模型。 */
   const renderProfile = (rep) => {
     const prof = rep.profile || {};
@@ -1087,13 +1171,31 @@
     const score = rep.score || {};
     const triage = score.triage || {};
     const axes = score.axes || {};
+    const bet = rep.bet || {};
+    const betLabel = BET_LABEL[bet.verdict] || "";
 
-    /* 结论 */
-    $("verdictLabel").textContent = triage.label || "未评估";
-    renderRichText($("verdictWhy"), triage.why || "");
+    /* 下注判决是首屏结论；旧的评分层结论移到「评分明细」作为旁注。 */
     const acts = $("verdictActs");
     acts.replaceChildren();
-    for (const a of triage.actions || []) acts.appendChild(el("li", null, a));
+    if (betLabel) {
+      $("verdictLabel").textContent = `下注判决：${betLabel}`;
+      const criteria = (bet.criteria || [])
+        .map((c) => `${c.rule}：${BET_STATUS[c.status] || c.status} — ${c.detail || ""}`);
+      const meta = `阈值 ${bet.threshold || "A"} · 置信度 ${bet.confidence || "low"}`
+        + ` · 身份模型 ${bet.identity || "anonymous"}`;
+      renderRichText($("verdictWhy"), [meta].concat(criteria).join("；"));
+      const structured = (rep.uncertainty && (rep.uncertainty.unknowns || []).length)
+        ? [] : (bet.unknowns || []);
+      for (const u of structured) acts.appendChild(el("li", null, `还不确定：${u}`));
+      for (const k of bet.kill_criteria || []) acts.appendChild(el("li", null, `改判条件：${k}`));
+    } else {
+      $("verdictLabel").textContent = triage.label || "未评估";
+      renderRichText($("verdictWhy"), triage.why || "");
+      for (const a of triage.actions || []) acts.appendChild(el("li", null, a));
+    }
+    $("scoreVerdictNote").textContent = triage.label
+      ? `评分层结论：${triage.label}${triage.why ? " — " + triage.why : ""}`
+      : "";
 
     /* 两个轴 */
     const hy = axes.hygiene || {};
@@ -1127,6 +1229,8 @@
     $("blind").textContent = blind.length ? "本结论不覆盖：" + blind.join(" ") : "";
 
     renderProfile(rep);
+    renderDiscovery(rep);
+    renderUncertainty(rep);
     renderEndpointMix(rep);
     renderIntel(rep);
 
@@ -1179,7 +1283,10 @@
         else if (verdict === "unusable") tr.classList.add("is-dead");
         tr.appendChild(el("td", "num al-r col-n", String(i + 1)));
         tr.appendChild(el("td", "mono", (e.methods || []).join(",")));
-        tr.appendChild(el("td", "mono", e.path || ""));
+        const pathCell = el("td", "mono");
+        pathCell.appendChild(el("span", null, e.path || ""));
+        if (e.discovered) pathCell.appendChild(el("span", "tag tag--ghost", "内容发现"));
+        tr.appendChild(pathCell);
         tr.appendChild(el("td", "dim", e.confidence || ""));
         tr.appendChild(el("td", "ep-verdict", verdict === "usable" ? "可用"
           : verdict === "unusable" ? "不可用" : "—"));

@@ -36,13 +36,14 @@ cd recon-one
 python -m reconone doctor                     # 先确认 httpx/anyio/ssl/dns 真的能用（1 秒，不联网）
 python -m reconone ui                         # 启动 Web 控制台（前后端同一进程）
 python -m reconone scan --domain example.com --profile default   # 纯命令行
-python -m unittest discover -s tests -t .     # 286 项测试（全部本地、不联网）
+python -m unittest discover -s tests -t .     # 331 项测试（全部本地、不联网）
 ```
 
 常用开关（`scan`）：`--no-js` 不下载前端 bundle、`--no-intel` 关闭被动情报、`--geo` 查 IP 地理位置、
 `--cve` 查版本 CVE 线索、`--proxy http://host:port` 指定出口（支持 socks5://）、`--proxy-from-system`
 强制走系统代理、`--direct` 禁止代理（含自动回退）、`--proxy-bypass "localhost,.corp"`；
-另有 `--no-verify` / `--verify-max N`（轻量验证）、`--no-dns`、`--no-graphql`、`--allow-external`、`--out`。
+另有 `--no-verify` / `--verify-max N`（轻量验证）、`--no-discovery` / `--discovery-max N`
+（定向内容发现）、`--no-dns`、`--no-graphql`、`--allow-external`、`--out`。
 需要登录态时：`--cookie "sid=…"`、`--bearer <token>`、`--header "X-Api-Key: …"`（可重复）；
 `--no-cookies` 关闭 Set-Cookie 会话保持；`--no-subdomains` 关闭子域探活（`--subdomain-max N` 调上限）；
 限速与退避：`--rate N`（每 host 每秒上限，默认 0=不限）、`--max-backoff S`（默认 8）。
@@ -98,12 +99,12 @@ python -m pip install -r requirements.txt     # 必需，缺失时启动会直�
 `RECONONE_TARGET_PARALLEL`（默认 4，上限 8）并行探测，每个目标独立的运行目录、进度与结论；
 控制台的进度条、每目标进度行与事件流都是**实时推送**（600ms 轮询），不需要刷新页面。
 
-**产物管理**：`/产物` 页列出 `runs/` 下所有报告包（目标、生成时间、端点数、结论、体积），
-可以切换当前查看的产物（服务端会按当前评分模型重算），或删除不再需要的目录（二次确认）。
+**产物管理**：`/产物` 页列出 `runs/` 下所有报告包（目标、生成时间、端点数、下注判决、体积），
+可以切换当前查看的产物（服务端会按当前模型重算 `score / profile / bet`），或删除不再需要的目录（二次确认）。
 
-**可视化**：概览页把三个数字画成**三轴雷达图**（价值 / 易度 / 机会指数，0–100，未采集的轴显示为空而不是
-0），旁边是**端点风险分布环形图**（按 `primary / secondary / inventory` 三档）与子域、主动探测强度、
-依赖版本三块紧凑信息。另有 **`/对比`** 视图：把多份产物的价值、易度、机会指数、子域数、端点数和
+**可视化**：首屏是**下注判决**（值得打 / 不值 / 证据不足 + 两条判据 + 改判条件），其下把三个数字画成
+**三轴雷达图**（价值 / 易度 / 机会指数，0–100，未采集的轴显示为空而不是 0），旁边是**端点风险分布
+环形图**（按 `primary / secondary / inventory` 三档）与子域、主动探测强度、依赖版本三块紧凑信息。另有 **`/对比`** 视图：把多份产物的价值、易度、机会指数、子域数、端点数和
 「主动实测权重占比」并排列出，点一行即可切到该产物——回答「先看哪一个」。
 两张图都是同一个报告数据的投影，不含任何前端推断；数据接口是只读的 `GET /api/compare`（需登录）。
 
@@ -144,17 +145,18 @@ python -m reconone ui --host 0.0.0.0                       # 仅在你确知网�
 | **非 JS 端点来源** | 链接、表单 action、robots、sitemap、Wayback 路径，与 JS 结果按路径合并并标 `sources` | `endpoints[source=html-link\|html-form\|robots\|sitemap\|wayback]` |
 | **被动情报** | CT 日志子域（CertSpotter 主 / crt.sh 回退）、Wayback 快照与历史敏感路径、可选 geo 与版本 CVE 线索 | `intel.ct / intel.archive / intel.geo / intel.cve` |
 | **目标画像** | 10 项价值 + 9 项难度规则表 → 价值/难度/机会指数（非概率），逐项标 `passive` / `active`，并给出主动权重占比 | `profile`、`profile.weights` |
-| **轻量验证** | 单身份 `HEAD` 判存在（405/501 补一次 GET），双身份两次 `GET` 做**授权差分**（anon 2xx + 内容差异 = 匿名开放）；RoE 方法/上限 + 作用域守卫双检，破坏性动词按词边界跳过 | `verification`、`verification.summary.authz`、`endpoints[].authz_open`、`meta.roe` |
+| **轻量验证** | 单身份 `HEAD` 判存在（405/501 补一次 GET），双身份两次 `GET` 做**授权差分**（anon 2xx + 内容差异 = 匿名开放）；`authz_open` 只在有观测时写入——单身份按状态（2xx/3xx 才算），双身份按 `anonymous_open` 标签；RoE 方法/上限 + 作用域守卫双检，破坏性动词按词边界跳过 | `verification`、`verification.summary.authz`、`endpoints[].authz_open`、`meta.roe` |
 | **TLS 证书** | 与请求走同一出口（直连 / CONNECT / SOCKS5），不再有隐藏直连 | `assets.tls.egress`、`assets.tls` |
 | **主动探测评分** | 只统计本次已经发出的请求：可达端点（`worth.live_surface`）、被拦截比例与 429 次数（`hard.active_blocking`）；不新增任何爆破/模糊测试 | `meta.probe_stats`、`profile.checks` |
 | **会话与限速** | 凭据按形状记录（头名/Cookie 键名/是否 Bearer，值不入盘）、每 host 独立限速、429/503 按 `Retry-After` 或指数退避 | `meta.session`、`meta.rate` |
 | **Set-Cookie 会话保持** | 记住站点下发的会话 cookie 并带回后续请求；`Domain` 只接受目标或其子域（`.com` 直接拒收）、`Secure` 双向校验、`Max-Age`/`Expires` 与删除语义 | `meta.session.cookies` |
 | **子域探活** | CT 子域逐个 `GET /`（HTTPS 失败按传输层错误回退一次 HTTP），判定 `gated`（401/403 或登录墙）/ `exposed`（2xx 且主机名或标题像内部系统）/ `public` / `dead`；**只探目标或其子域**，越界只记录不发请求 | `assets.subdomains[].probed/label/non_public`、`meta.subdomains` |
+| **定向内容发现** | 候选只来自三处：已观测端点的目录前缀、技术栈规则表、少量公共路径；每个目录前缀先请求一条**确定性不存在路径**做基线，候选与同前缀基线比对，识别 soft-404（根基线看不出 `/api/*` 的 catch-all）；上限按 profile（fast 20 / default 80 / deep 160）或 `--discovery-max`，不做字典 | `discovery` 块（baseline/baselines/stats/rows）、`coverage.counts.discovered`、`endpoints[sources=content-discovery]` |
 | **依赖自检** | `python -m reconone doctor` 行为级验证 httpx/anyio/ssl/dns；每次扫描把版本写进报告 | `meta.deps`、CLI 退出码 4 |
 
-**不做的事**（边界清晰）：不发送攻击载荷、不爆破口令、不做业务逻辑验证、不横向移动。主动路径**不调用任何
-第三方 SaaS**；被动的 CT / Wayback / 可选 geo / CVE 只是把已公开的数据拉进本地，`--no-intel` 可整体关闭。
-它只测绘与推断。
+**不做的事**（边界清晰）：不发送攻击载荷、不爆破口令、**不做目录爆破**（内容发现只探测有界候选）、
+不做业务逻辑验证、不横向移动。主动路径**不调用任何第三方 SaaS**；被动的 CT / Wayback / 可选 geo / CVE
+只是把已公开的数据拉进本地，`--no-intel` 可整体关闭。它只测绘与推断。
 
 ### 1.1 不下载前端也能发现接口
 
@@ -176,23 +178,47 @@ python -m reconone ui --host 0.0.0.0                       # 仅在你确知网�
 画像解决"好不好打"，**判决**解决"要不要下注"。报告顶层有 `bet` 块（阈值 A），两条判据：
 
 - `anonymous_parameterized`：**带参数**的端点**无需凭据**即可访问。没有注入身份时本次扫描本身即匿名，
-  命中即算；注入了 `--cookie/--bearer` 时用**两次 GET**（认证 / 匿名）比对，只有匿名侧 2xx/3xx 才算，
-  并给出响应长度与标题差异作为内容证据。
+  但“匿名”不等于“可访问”：只有 2xx/3xx 才算命中，401/403/405/429 只证明端点存在（`authz_open=false`）；
+  注入了 `--cookie/--bearer` 时用**两次 GET**（认证 / 匿名）比对，只有匿名侧 2xx/3xx **且内容与认证态
+  不同**（`anonymous_open`）才算；两边完全相同的 `same` 不算命中。
 - `live_subdomain_nonpublic`：**探到的**存活子域暴露非公开面（`gated` 或 `exposed`）。没探就记 `unknown`，
   探了没暴露记 `miss`——这条判据只能把判决抬到 `worth`，不能否决。
 
-**判决规则（一次证伪驱动的修正）**：判据一是唯一能否决的判据。它明确未命中（没有带参数端点 / 全部
-不可用 / 全部被 401、403 拦住）且扫描够厚（验证跑过、未被截断）→ `not_worth`。判据二**只能升级**：
+**判决规则（两次证伪驱动的修正）**：判据一是唯一能否决的判据。它必须**明确**未命中（没有带参数端点 /
+全部不可用 / 全部未证明匿名开放），且扫描够厚（验证跑过、未被截断）→ `not_worth`。判据二**只能升级**：
 探到暴露的存活子域才把判决抬到 `worth`，缺它不会把 `not_worth` 变成 `withheld`。
 
 早期版本把"子域未探测"记成 `unknown` 并据此判 `withheld`，结果 `not_worth` **永远不可达**——纯公开
 静态站也会被判"看不清"。修复后静态站稳定输出 `not_worth`，并有端到端回归钉住它
 （`TestStaticSiteIsJudgedNotWorth`）。`withheld` 现在只剩两种含义：判据一判不了（验证关掉、带参数端点
-未验证），或扫描太薄不信负数（被截断）。报告永远并排列出判据、计数、`kill_criteria` 与 `unknowns`。
+未验证），或扫描太薄不信负数（被截断）。注意“截断”只指字节/时间预算打断，**单个 404 脚本不会**把
+一次完整扫描改判为 `withheld`。报告永远并排列出判据、计数、`kill_criteria` 与 `unknowns`。
 
 顺带说明验证引擎的取法：单身份用 `HEAD` 判存在（比 GET 便宜、无响应体），服务器拒绝 `HEAD`（405/501）
 时补一次 `GET`；双身份用两次 `GET` 做授权差分。破坏性动词（`close/void/refund/apply…`）按**词边界**
-跳过，`/applications` 不会被 `apply` 误杀。
+跳过，`/applications` 不会被 `apply` 误杀。验证预算有限（默认 40 次请求，双身份每端点 2 次），所以队列
+按 **testability** 排序：带参数、写方法、高置信端点先验证，同一路径的 JS 与 OpenAPI 结果合并后只花一次。
+
+并发 API 探测（OpenAPI/GraphQL）也遵守同一套纪律：注入头、cookie jar、作用域检查、重定向逐跳、
+限速与失败台账都在；一旦启用 `--proxy` 或 `--rate`，这条路径直接退回串行 `Session.request`，
+宁可慢一点，也不让请求走另一条路由。
+
+### 1.4 未知面与下一步：把"未知性"变成可执行动作
+
+判断"值不值得打"的前提是承认还有没看到的面。报告顶层 `uncertainty` 块把这句话变成可核对的数据：
+
+- `facts`：带参端点已判定 `x/y`（`parameterised_checked_pct`）、子域已探 `x/y`、未完成阶段、是否截断。
+- `unknowns`：每个未闭合项带 `impact`（high/medium/low，**序数策略，不是概率**）、`count`、`cost_requests`
+  （按本次身份与端点数的请求估算）、`affects`（判据一/二）、`could_change_verdict_to`、`action`、`samples`。
+- `next_actions`：按 **影响降序 → 请求成本升序 → id** 排序的前 5 项。第一个动作是最便宜的高影响未知，
+  不是最长清单。
+- `verdict_flips`：当前判决的改判路径（`withheld/not_worth → worth`、`withheld → not_worth`、
+  `worth → not_worth`），写明条件、关联未知项与成本。
+
+典型项：未验证的带参端点、缺少匿名访问判定的端点、未探的 CT 子域、验证关闭、JS 跳过、内容发现未跑/被
+基线拦截/截断、未知方法端点、低置信端点。`worth` 还会附一条"确认命中仍可交付"的复核动作。
+它是纯函数，进 `deterministic_digest`；`report.md`、`handoff.md`（§2.1）、`brief.md` 与概览卡片读的是
+同一份排序。
 
 ## 2. 报告格式与交付方式
 
@@ -209,7 +235,7 @@ runs/<domain>/
   report/endpoints.jsonl    # 流式，便于 grep/jq
   report/findings.jsonl
   report/hypotheses.jsonl
-  report/requests.jsonl     # 请求台账：本次真正发出的每个请求（method/url/status/egress）
+  report/requests.jsonl     # 请求台账：本次真正发出的每个请求（含失败尝试，method/url/status/egress/error）
   raw/js/<sha16>.js         # 原始 bundle（密钥原文仅存在于此）
   raw/js/<sha16>.pretty.js  # 换行后的可读版本
   raw/maps/*.map            # source map 原文
@@ -231,7 +257,7 @@ runs/<domain>/
 
 | 约束 | 实现 | 可验证方式 |
 |---|---|---|
-| 体积 | 20 个 Python 模块 + 3 个规则 JSON，源码约 282 KB | `python -c "import glob,os;print(sum(os.path.getsize(f) for f in glob.glob('reconone/*.py')))"` |
+| 体积 | 30 个 Python 模块 + 4 个规则 JSON，源码约 481 KB | `python -c "import glob,os;print(sum(os.path.getsize(f) for f in glob.glob('reconone/*.py')))"` |
 | 依赖（必需） | 只用标准库实现探测逻辑；DNS 自行实现 UDP/TCP 查询（无 dnspython）。`httpx` + `anyio` 是并发的必需依赖，缺失时启动即报错并提示安装命令 | `python -m pip install -r requirements.txt`；`tests` 全绿 |
 | 无外部服务 | 所有请求直达目标；默认禁止跨域请求 | `--allow-external` 关闭时 `scope_blocks` 拦截 |
 | 单一入口 | `python -m reconone scan` | — |
@@ -241,7 +267,7 @@ runs/<domain>/
 
 ## 4. 验收标准
 
-完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。27 条验收项由测试断言。当前全仓 **286 tests OK**（`test_pipeline` 75 / `test_concurrency` 11 / `test_web` 17 / `test_intel` 19 / `test_triage` 22 / `test_doctor` 5 / `test_redaction` 28 / `test_egress` 16 / `test_verify` 17 / `test_session` 34 / `test_cookies` 23 / `test_subdomains` 19），`python -m unittest discover -s tests -t .` 可直接复现。
+完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。32 条验收项由测试断言。当前全仓 **331 tests OK**（`test_pipeline` 83 / `test_concurrency` 17 / `test_discovery` 13 / `test_uncertainty` 7 / `test_web` 17 / `test_intel` 19 / `test_triage` 26 / `test_doctor` 5 / `test_redaction` 28 / `test_egress` 16 / `test_verify` 19 / `test_session` 35 / `test_cookies` 24 / `test_subdomains` 22），`python -m unittest discover -s tests -t .` 可直接复现。
 
 ## 5. 已知限制
 
@@ -258,6 +284,9 @@ runs/<domain>/
   不会停它。请求台账如实记录方法，所以"这次到底发了什么"可核对。
 - **eTLD+1** 内置简化规则，未加载 public suffix list。
 - 端点方法推断（`GET?`）来自邻近上下文，置信度低于规范来源。
+- **内容发现是有界的观测**：候选来自已观测端点前缀 + 技术栈表 + 少量公共路径，不是字典；同目录基线能挡住
+  catch-all/soft-404，但动态渲染、多语言跳转与带随机内容的页面仍可能造成漏判或误判。positive 行是
+  `confidence=low` 的端点，且**不声明匿名开放**。
 - **被动情报依赖第三方可用性**：crt.sh 实测长期 502，故 CertSpotter 为主、crt.sh 为回退；Wayback 可能超时。
   任一失败都只在报告里写 `unavailable` + 原因，并把对应检查降为 `unknown`，不会伪造「干净」结论。
 - **geo 与 CVE 默认关闭**（`--geo` / `--cve`）：前者把目标 IP 交给 ip-api，后者依赖 NVD 且无 key 严格限流。
@@ -267,13 +296,15 @@ runs/<domain>/
 ```
 recon-one/
   reconone/    cli(编排) config http dns webprobe crawl jsanalyze apiprobe intel(被动情报)
-               triage(画像) hypotheses(决策) score(评分) report(组装) brief(简报)
-               verify(轻量验证) inject(会话注入) cookiejar(Set-Cookie) rate(限速退避) egress(出口)
+               triage(画像) uncertainty(未知面/改判路径) hypotheses(决策) score(评分)
+               report(组装) brief(简报) verify(轻量验证) discovery(定向内容发现)
+               inject(会话注入) cookiejar(Set-Cookie) rate(限速退避) egress(出口)
                redact(脱敏) doctor(依赖自检) concurrency(并发) auth(凭据) web(控制台) util
-  rules/       technologies.json (47 条), secrets.json (17 条), score.json (权重与评级)
-  tests/       fixture_server.py, test_pipeline.py, test_concurrency.py, test_web.py,
-               test_intel.py, test_triage.py, test_doctor.py, test_redaction.py,
-               test_egress.py, test_verify.py, test_session.py, test_cookies.py
+  rules/       technologies.json (47 条), secrets.json (17 条), score.json (权重与评级),
+               discovery.json (技术栈/公共路径候选，非字典)
+  tests/       fixture_server.py, test_pipeline.py, test_concurrency.py, test_discovery.py,
+               test_uncertainty.py, test_web.py, test_intel.py, test_triage.py, test_doctor.py,
+               test_redaction.py, test_egress.py, test_verify.py, test_session.py, test_cookies.py
   docs/        ARCHITECTURE.md, INTEL.md（被动/主动与画像算法）, ACCEPTANCE.md, SCORING.md,
                WEB-UI.md, RESEARCH.md, AUTHORIZED-USE.md 等
   SECURITY.md  仓库级授权声明 + 本工具漏洞报告渠道 + 五层脱敏范围

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import json
 import os
 import re
@@ -10,7 +9,8 @@ import sys
 import time
 from urllib.parse import urlsplit
 
-from . import apiprobe, crawl as crawler, dns as dnsmod, egress as egressmod, hypotheses
+from . import apiprobe, crawl as crawler, discovery as discoverymod
+from . import dns as dnsmod, egress as egressmod, hypotheses
 from . import jsanalyze, report as reportmod
 from . import brief as briefmod
 from . import cookiejar as cookiejarmod
@@ -25,7 +25,7 @@ from .config import (AUTHORIZED_USE, AUTHORIZED_USE_SHORT, PROFILES, RESERVED_RU
                      VERSION, ensure_out_dir, find_existing_run, profile as load_profile,
                      run_dir_name)
 from .http import Session
-from .util import ensure_dir, now_iso
+from .util import ensure_dir, is_ip_literal, now_iso
 
 
 class ScanCancelled(Exception):
@@ -50,12 +50,44 @@ def _versioned_products(headers: dict) -> list[str]:
 
 
 def _is_ip_target(value: str) -> bool:
-    """CT logs and the web archive index host names, not addresses: skip them for IPs."""
-    try:
-        ipaddress.ip_address(str(value or "").split(":")[0])
-        return True
-    except ValueError:
-        return False
+    """CT logs and the web archive index host names, not addresses: skip them for IPs.
+
+    `host:port` is not an IP (`example.com:8443`), and `[::1]:443` is; the distinction lives
+    in `util.is_ip_literal` so the CLI, cookie jar and bet sheet cannot drift apart.
+    """
+    return is_ip_literal(value)
+
+
+def _verification_targets(js: dict, api: dict) -> list[dict]:
+    """Unique endpoints, most decision-relevant first.
+
+    Verification is capped by `--verify-max` (40 by default, two GETs per endpoint in dual
+    mode), so the order decides which endpoints ever get an answer. Raw discovery order is
+    path-alphabetical noise; `_testability` puts parameterised/write/high-confidence first.
+    Duplicate paths are merged into the first row so the budget is not spent twice.
+    """
+    targets: list[dict] = list(js.get("endpoints") or [])
+    for spec in api.get("specs") or []:
+        targets.extend(spec.get("endpoints") or [])
+    unique: dict[str, dict] = {}
+    for endpoint in targets:
+        path = str(endpoint.get("path") or "")
+        if not path:
+            continue
+        first = unique.get(path)
+        if first is None:
+            unique[path] = endpoint
+            continue
+        for key in ("methods", "params", "sources"):
+            if endpoint.get(key):
+                first[key] = sorted(set(first.get(key) or []) | set(endpoint.get(key) or []))
+        if len(first.get("evidence") or []) < 3 and endpoint.get("evidence"):
+            first["evidence"] = (first.get("evidence") or []) + endpoint["evidence"][:1]
+        rank = {"high": 3, "medium": 2, "low": 1}
+        if rank.get(endpoint.get("confidence"), 0) > rank.get(first.get("confidence"), 0):
+            first["confidence"] = endpoint["confidence"]
+            first["raw"] = endpoint.get("raw", first.get("raw", path))
+    return sorted(unique.values(), key=reportmod._testability)
 
 
 def _passive_endpoints(domain: str, web: dict, crawl_result: dict, intel: dict) -> list[dict]:
@@ -130,7 +162,8 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
              cookie: str = "", bearer: str = "", headers=(), rate: float = 0.0,
              max_backoff: float = 8.0, injection_source: str = "cli",
              use_cookies: bool = True, probe_subdomains: bool = True,
-             subdomain_max: int = 0) -> tuple[dict, int]:
+             subdomain_max: int = 0, use_discovery: bool = True,
+             discovery_max: int = 0) -> tuple[dict, int]:
     """Run every probe once. `on_event` receives stage dicts; `cancel` is polled between stages.
 
     `use_js=False` skips bundle download + JS analysis entirely: endpoints then come from
@@ -181,7 +214,8 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
     # per stage sits at 50% for the whole scan and teaches the user to ignore it.
     STAGE_PLAN = [
         ("start", 2), ("dns", 5), ("web", 10), ("intel", 8), ("crawl", 26),
-        ("js", 24), ("api", 8), ("verify", 6), ("analyze", 9), ("report", 8),
+        ("js", 24), ("api", 8), ("verify", 6), ("discover", 6), ("analyze", 9),
+        ("report", 8),
     ]
     stage_done = 0.0
     total_weight = sum(w for _, w in STAGE_PLAN) or 1
@@ -280,11 +314,14 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
             domain=domain, root_url=f"https://{domain}/", profile_name=profile_name, limits=limits,
             web=web, dns=dns_result, crawl_result={}, js={}, api={}, findings=[], hyp=[],
             session=session, started_at=started_at, elapsed=time.time() - clock,
-            probe_status={**status, "crawl": "skipped", "js": "skipped", "api": "skipped"},
+            probe_status={**status, "crawl": "skipped", "js": "skipped", "api": "skipped",
+                          "discovery": "skipped"},
         intel=intel, authorized_by=authorized_by,
         verification=verifymod.run(session, f"https://{domain}/", [],
                                    verifymod.build_roe(domain, allow_external, 0, enabled=False,
                                                        source="skipped:unreachable")),
+        discovery={"version": discoverymod.VERSION, "enabled": False,
+                   "status": "skipped", "stats": {}, "rows": []},
         )
         reportmod.write_all(report, out_dir, requests=reportmod.request_rows(session))
         return report, 3
@@ -312,7 +349,8 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
         # comes from links, forms, robots, sitemap and the archive instead.
         js = {"scripts": [], "endpoints": [], "params": [], "secrets": [], "hints": [],
               "hosts": [], "chunks": [], "graphql": [],
-              "stats": {"fetched": 0, "bytes": 0, "requested": 0}}
+              "stats": {"fetched": 0, "failed": 0, "bytes": 0, "requested": 0,
+                        "budget_cut": False}}
         status["js"] = "skipped"
         emit("js", "JS 分析已跳过（不下载前端 bundle）")
 
@@ -346,9 +384,11 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
 
     # ---- verification: existence by HEAD, authz by two GETs, bound by RoE + scope guard ----
     # Runs last, after every endpoint source has landed, because it must see the final list.
-    verify_targets = list(js.get("endpoints") or [])
+    all_verify_endpoints = list(js.get("endpoints") or [])
     for spec in api.get("specs") or []:
-        verify_targets.extend(spec.get("endpoints") or [])
+        all_verify_endpoints.extend(spec.get("endpoints") or [])
+    # Spend the capped request budget on the endpoints that can change the bet first.
+    verify_targets = _verification_targets(js, api)
     # A second, credential-free session is what makes "open without credentials" provable.
     # It shares the limiter and the egress route so pacing and attribution stay one story.
     anon_session = None
@@ -366,13 +406,38 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
                               identity_model=("dual" if anon_session is not None else "single"))
     verification = verifymod.run(session, root_url, verify_targets, roe,
                                  anon_session=anon_session)
-    verifymod.annotate(verify_targets, verification)
+    # Annotate every endpoint dict that will land in the report, not just the deduped
+    # verification list: the same path may arrive from both JS and an OpenAPI spec.
+    verifymod.annotate(all_verify_endpoints, verification)
     summary = verification.get("summary") or {}
     status["verify"] = ("skipped" if not use_verify else
                         ("ok" if summary.get("probed") else "empty"))
     emit("verify", f"验证：可用 {summary.get('usable', 0)} / 不可用 {summary.get('unusable', 0)}"
                    f" / 跳过 {summary.get('skipped', 0)}（请求 {summary.get('requests', 0)}"
                    f"/{summary.get('max_requests', 0)}）")
+
+    # ---- targeted content discovery: bounded candidates, checked against a 404 baseline ----
+    discovery = {"version": discoverymod.VERSION, "enabled": False,
+                 "status": "skipped", "stats": {}, "rows": []}
+    cap = int(discovery_max or limits.get("discovery_max") or 0)
+    if use_discovery and cap > 0:
+        emit("discover", f"定向内容发现：候选上限 {cap}（不是字典）")
+        discovery = discoverymod.run(
+            session, root_url,
+            [str(e.get("path") or "") for e in all_verify_endpoints],
+            [str(t.get("name") or "") for t in (web.get("tech") or [])],
+            domain, max_candidates=cap,
+        )
+        dstats = discovery.get("stats") or {}
+        # "empty" means the candidate table produced nothing; the stage still ran.
+        status["discovery"] = ("ok" if discovery.get("status") in ("ok", "empty")
+                               else str(discovery.get("status") or "error"))
+        emit("discover", f"内容发现：候选 {dstats.get('candidates', 0)}，探测 "
+                         f"{dstats.get('probed', 0)}，存在 {dstats.get('present', 0)}，"
+                         f"受保护 {dstats.get('gated', 0)}，不存在 {dstats.get('absent', 0)}")
+    else:
+        status["discovery"] = "skipped"
+        emit("discover", "定向内容发现已跳过")
 
     findings = reportmod.derive_findings(web, js, api, dns_result)
     sourcemaps = [s["sourcemap"] for s in js.get("scripts", []) if s.get("sourcemap")]
@@ -397,7 +462,7 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
         dns=dns_result, crawl_result=crawl_result, js=js, api=api, findings=findings, hyp=hyp,
         session=session, started_at=started_at, elapsed=time.time() - clock, probe_status=status,
         intel=intel, authorized_by=authorized_by, verification=verification,
-        subdomain_probe=subdomain_probe,
+        subdomain_probe=subdomain_probe, discovery=discovery,
     )
     # The AI-facing brief lives beside the machine report so a task description can be
     # pasted from a file instead of reassembled by hand every time. Write it *before*
@@ -473,6 +538,8 @@ def cmd_scan(args) -> int:
                             use_cookies=not getattr(args, "no_cookies", False),
                             probe_subdomains=not getattr(args, "no_subdomains", False),
                             subdomain_max=int(getattr(args, "subdomain_max", 0) or 0),
+                            use_discovery=not getattr(args, "no_discovery", False),
+                            discovery_max=int(getattr(args, "discovery_max", 0) or 0),
                             verify_max=getattr(args, "verify_max", verifymod.DEFAULT_MAX_REQUESTS))
     if args.json:
         print(json.dumps({"exit_code": code, "counts": report["coverage"]["counts"],
@@ -593,6 +660,10 @@ def build_parser() -> argparse.ArgumentParser:
                       help="skip subdomain liveness probing（判据二会保持 unknown）")
     scan.add_argument("--subdomain-max", type=int, default=0, metavar="N",
                       help="max CT hosts to probe for liveness (0 = profile default: 20, deep: 40)")
+    scan.add_argument("--no-discovery", action="store_true",
+                      help="skip targeted content discovery (JS prefixes + tech paths + 404 baseline)")
+    scan.add_argument("--discovery-max", type=int, default=0, metavar="N",
+                      help="max content-discovery candidates (0 = profile default: fast 20, default 80, deep 160)")
     scan.add_argument("--geo", action="store_true",
                       help="look up the resolved IP's location via ip-api.com (sends the IP to a third party)")
     scan.add_argument("--cve", action="store_true",

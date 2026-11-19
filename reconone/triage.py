@@ -17,6 +17,8 @@ what lets an operator run the whole thing without touching the target.
 """
 from __future__ import annotations
 
+from .util import is_ip_literal
+
 PASS, WARN, FAIL, UNKNOWN = "pass", "warn", "fail", "unknown"
 PASSIVE, ACTIVE = "passive", "active"
 
@@ -102,8 +104,11 @@ def _worth_checks(report: dict, intel: dict) -> list[dict]:
         ACTIVE, [{"kind": "param", "count": len(named)}], "observed in this run"))
 
     api_like = [e for e in endpoints
-                if "/api/" in (e.get("path") or "").lower()
-                or (e.get("path") or "").startswith(("/v1", "/v2", "/v3", "/rest", "/graphql"))]
+                # Discovered prefixes are observations but still guesses about *intent*;
+                # they must not inflate the value score the way JS/spec endpoints do.
+                if not e.get("discovered") and (
+                    "/api/" in (e.get("path") or "").lower()
+                    or (e.get("path") or "").startswith(("/v1", "/v2", "/v3", "/rest", "/graphql")))]
     out.append(_check(
         "worth.api_surface", "worth", 10,
         PASS if len(api_like) >= 10 else (WARN if api_like else FAIL),
@@ -398,6 +403,8 @@ def headers_lower(assets: dict) -> set[str]:
 BET_THRESHOLD = "A"
 
 BET_DEFINITION = ("A：至少 1 个**匿名可访问且带参数**的端点，或 1 个**存活子域暴露非公开面**。"
+                  "“匿名可访问”必须由观测证明：单身份只有 2xx/3xx 算，双身份只有匿名侧 2xx "
+                  "且内容与认证态不同算；401/403/405/429 只证明端点存在。"
                   "判据一是唯一能否决的判据：它明确未命中且扫描够厚 → not_worth；"
                   "判据二只能把判决升级为 worth，缺它不会把 not_worth 变成 withheld。")
 
@@ -412,13 +419,8 @@ def _param_names(endpoint: dict) -> list[str]:
 
 
 def _is_ip(text: str) -> bool:
-    text = str(text or "").strip().strip("[]")
-    if not text:
-        return False
-    if ":" in text:
-        return True
-    parts = text.split(".")
-    return len(parts) == 4 and all(part.isdigit() for part in parts)
+    """`example.com:8443` is a name with a port, not an IP literal."""
+    return is_ip_literal(text)
 
 
 def bet(report: dict) -> dict:
@@ -453,28 +455,35 @@ def bet(report: dict) -> dict:
     usable_p = [ep for ep in with_params if ep.get("verified") == "usable"]
     skipped_p = [ep for ep in with_params if ep.get("verified") == "skipped"]
 
-    opened, gated, undecided = [], [], []
+    # `authz_open` is only ever stamped when the answer is known: single-identity runs derive
+    # it from the observed status (2xx/3xx = open, 401/403/405/429 = not open), dual-identity
+    # runs derive it from the authz label (`anonymous_open` only). "usable" alone means the
+    # path exists, not that it is reachable without credentials — conflating the two was how
+    # a 401-protected endpoint became a `worth` verdict.
+    opened, not_open, undecided = [], [], []
     for endpoint in usable_p:
-        if not dual:
-            # No identity was injected: every request this scan made *was* anonymous.
+        flag = endpoint.get("authz_open")
+        if flag is True:
             opened.append(endpoint)
-        elif endpoint.get("authz_open") is True:
-            opened.append(endpoint)
-        elif endpoint.get("authz_open") is False:
-            gated.append(endpoint)
+        elif flag is False:
+            not_open.append(endpoint)
         else:
             undecided.append(endpoint)
 
     if opened:
         first, detail = "hit", f"{len(opened)} 个带参数端点无需凭据即可访问"
     elif undecided:
-        first, detail = "unknown", f"{len(undecided)} 个带参数端点缺少授权对比"
+        first, detail = "unknown", f"{len(undecided)} 个带参数端点缺少匿名访问判定"
     elif not verify_on:
         first, detail = "unknown", "验证未启用，无法判定匿名可访问"
-    elif usable_p:
-        first, detail = "miss", f"{len(gated)} 个可用的带参数端点全部被 401/403 拦住"
     elif skipped_p:
+        # A skipped parameterised endpoint is still a possible hit. A negative verdict is
+        # only allowed after every parameterised endpoint has an answer, so this must be
+        # checked *before* the decisive-miss branch.
         first, detail = "unknown", f"{len(skipped_p)} 个带参数端点未验证（预算/作用域/排除）"
+    elif usable_p:
+        first, detail = ("miss", f"{len(not_open)} 个可用的带参数端点均未证明匿名可访问"
+                                  "（401/403/405/429 或双身份内容相同）")
     elif with_params:
         first, detail = "miss", f"{len(with_params)} 个带参数端点全部不可用（404/5xx/连不上）"
     else:
@@ -489,7 +498,9 @@ def bet(report: dict) -> dict:
     if probed_subs:
         exposed = sum(1 for sub in probed_subs if sub.get("non_public"))
         second = "hit" if exposed else "miss"
-        second_detail = (f"{len(probed_subs)} 个存活子域已探测，其中 {exposed} 个暴露非公开面")
+        # `probed` means "the host answered", not "the host is live": a 404 is still an
+        # answer. Say what was probed, and separately how many exposed a non-public face.
+        second_detail = (f"{len(probed_subs)} 个已探子域中 {exposed} 个暴露非公开面")
     elif _is_ip(target.get("domain")):
         second, second_detail = "miss", "IP 目标：没有子域维度"
     elif subs:
@@ -521,7 +532,7 @@ def bet(report: dict) -> dict:
 
     unknowns = []
     if undecided:
-        unknowns.append(f"{len(undecided)} 个带参数端点缺授权对比")
+        unknowns.append(f"{len(undecided)} 个带参数端点缺匿名访问判定")
     if skipped_p:
         unknowns.append(f"{len(skipped_p)} 个带参数端点未验证")
     if second == "unknown":
@@ -554,7 +565,7 @@ def bet(report: dict) -> dict:
         "counts": {"parameterised": len(with_params),
                    "parameterised_usable": len(usable_p),
                    "parameterised_unverified": len(skipped_p),
-                   "anonymous_open": len(opened), "gated": len(gated),
+                   "anonymous_open": len(opened), "not_open": len(not_open),
                    "undecided": len(undecided),
                    "anonymous_open_write": len(writes)},
         "evidence": evidence,

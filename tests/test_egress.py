@@ -344,7 +344,8 @@ class TestFailureClassification(unittest.TestCase):
             resp = session.request("http://127.0.0.1:1/x")
             self.assertIsNone(resp.error, resp.error)
             self.assertEqual(resp.body, b"proxied-ok")
-            self.assertEqual([entry["egress"] for entry in session.log], ["fallback", "proxy"])
+            self.assertEqual([entry["egress"] for entry in session.log], ["direct", "fallback"],
+                             "台账按真实尝试逐条记录：先直连失败，再回退成功")
             self.assertEqual(session.fallback_count, 1)
             self.assertEqual(counter.requests, 1)
             view = session.egress.view(session.fallback_count, session.requests)

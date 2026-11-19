@@ -44,6 +44,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "concurrency": 6,
         "budget_seconds": 90,
         "include_subdomains": False,
+        "discovery_max": 20,
     },
     "default": {
         "max_pages": 40,
@@ -56,6 +57,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "concurrency": 8,
         "budget_seconds": 300,
         "include_subdomains": False,
+        "discovery_max": 80,
     },
     "deep": {
         "max_pages": 150,
@@ -68,6 +70,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "concurrency": 10,
         "budget_seconds": 900,
         "include_subdomains": True,
+        "discovery_max": 160,
     },
 }
 

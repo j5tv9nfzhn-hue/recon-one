@@ -434,12 +434,18 @@ def analyze(session, script_urls: list[str], inline_scripts: list[str], domain: 
 
     queue = list(dict.fromkeys(script_urls))[:max_scripts]
     fetched = 0
+    failed = 0
+    budget_cut = False
     for url in queue:
         if session.exhausted or fetched >= max_scripts or total >= max_total_js_bytes:
+            # A budget stop is different from a 404: only the former makes the scan too thin
+            # to trust a negative (`coverage.truncated`), the latter is just a missing file.
+            budget_cut = True
             break
         resp = session.request(url, max_bytes=max_js_bytes,
                                headers={"Accept": "*/*", "Referer": f"https://{domain}/"})
         if resp.error or resp.status >= 400 or not resp.body:
+            failed += 1
             scripts.append({"url": url, "status": resp.status, "error": resp.error or "empty",
                             "bytes": len(resp.body)})
             continue
@@ -495,7 +501,8 @@ def analyze(session, script_urls: list[str], inline_scripts: list[str], domain: 
         "hosts": sorted(merged["hosts"].values(), key=lambda h: h["url"]),
         "chunks": sorted(merged["chunks"]),
         "graphql": sorted(merged["graphql"]),
-        "stats": {"fetched": fetched, "bytes": total, "requested": len(queue)},
+        "stats": {"fetched": fetched, "failed": failed, "bytes": total,
+                  "requested": len(queue), "budget_cut": budget_cut},
     }
     # Redaction is not enough: a snippet that quotes the secret leaks it just as well.
     # Replace every raw value with its masked form across the whole result before it leaves memory.

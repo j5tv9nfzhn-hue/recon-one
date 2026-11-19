@@ -10,16 +10,26 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from reconone import apiprobe, concurrency
-from reconone.http import Session
+from reconone import apiprobe, concurrency, egress as egressmod, inject
+from reconone import rate as ratemod
+from reconone.http import Response, Session
 
 
 class _Handler(BaseHTTPRequestHandler):
     hits: list[str] = []
+    seen: list[dict] = []
     delay = 0.20
 
     def log_message(self, *args):        # 静音
         pass
+
+    def _record(self):
+        type(self).hits.append(self.path)
+        type(self).seen.append({
+            "path": self.path,
+            "authorization": self.headers.get("Authorization", ""),
+            "cookie": self.headers.get("Cookie", ""),
+        })
 
     def _reply(self, body: bytes, status=200, ctype="application/json"):
         self.send_response(status)
@@ -29,8 +39,28 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        type(self).hits.append(self.path)
+        self._record()
         time.sleep(self.delay)
+        if self.path == "/redirect":
+            self.send_response(302)
+            self.send_header("Location", "/openapi.json")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.path == "/redirect-evil":
+            self.send_response(302)
+            self.send_header("Location", "http://example.org/elsewhere")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.path == "/set-cookie":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Set-Cookie", "sid=CONCURRENT123; Path=/")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
         if self.path == "/openapi.json":
             import json
             self._reply(json.dumps({
@@ -41,7 +71,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._reply(b'{"detail":"not found"}', 404)
 
     def do_POST(self):
-        type(self).hits.append(self.path)
+        self._record()
         time.sleep(self.delay)
         self._reply(b'{"errors":[{"message":"no introspection"}]}', 200)
 
@@ -50,6 +80,7 @@ class _Base(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _Handler.hits = []
+        _Handler.seen = []
         cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         cls.port = cls.srv.server_address[1]
         cls.base = f"http://127.0.0.1:{cls.port}"
@@ -140,6 +171,74 @@ class TestBudgets(_Base):
         out = concurrency.fetch_many(sess, jobs, degree=4, cancel=cancel)
         self.assertEqual(len(out), 4)
         self.assertTrue(all(r.error for r in out))
+
+
+class TestSessionDiscipline(_Base):
+    """The fast path must not be a second, less careful HTTP client."""
+
+    def test_injection_and_cookie_jar_reach_concurrent_requests(self):
+        sess = self.session(injection=inject.build("sid=INJECTED123", "BEARER123",
+                                                   ["X-Api-Key: KEY123"]))
+        sess.cookies.enabled = True
+        sess.cookies.scope = "127.0.0.1"
+        sess.cookies.store("127.0.0.1", "/", False, ["jar=JARVALUE"])
+        _Handler.seen = []
+        jobs = [{"url": self.base + "/a"}, {"url": self.base + "/b"}]
+        out = concurrency.fetch_many(sess, jobs, degree=2)
+        self.assertTrue(all(r.error is None for r in out))
+        self.assertEqual(len(_Handler.seen), 2)
+        for seen in _Handler.seen:
+            self.assertEqual(seen["authorization"], "Bearer BEARER123")
+            self.assertIn("jar=JARVALUE", seen["cookie"])
+            self.assertIn("sid=INJECTED123", seen["cookie"])
+
+    def test_set_cookie_from_a_concurrent_response_is_stored(self):
+        sess = self.session()
+        sess.cookies.enabled = True
+        sess.cookies.scope = "127.0.0.1"
+        out = concurrency.fetch_many(sess, [{"url": self.base + "/set-cookie"}], degree=2)
+        self.assertEqual(out[0].status, 200)
+        self.assertEqual(sess.cookies.stats()["stored"], 1)
+        self.assertEqual(sess.cookies.header_for("127.0.0.1", "/", False), "sid=CONCURRENT123")
+
+    def test_redirect_is_followed(self):
+        sess = self.session()
+        out = concurrency.fetch_many(sess, [{"url": self.base + "/redirect"}], degree=2)
+        self.assertEqual(out[0].status, 200)
+        self.assertIn("openapi", out[0].text())
+
+    def test_out_of_scope_redirect_is_blocked(self):
+        sess = self.session()
+        out = concurrency.fetch_many(sess, [{"url": self.base + "/redirect-evil"}], degree=2)
+        self.assertIn("out_of_scope", out[0].error or "")
+        self.assertTrue(any("example.org" in url for url in sess.off_scope_attempts))
+
+    def test_proxy_egress_uses_the_serial_session_path(self):
+        sess = self.session()
+        sess.egress = egressmod.resolve("manual", "http://127.0.0.1:9")
+        calls: list[str] = []
+
+        def fake_request(url, **kwargs):
+            calls.append(url)
+            return Response(url, status=200, body=b"{}")
+
+        sess.request = fake_request
+        out = concurrency.fetch_many(
+            sess, [{"url": self.base + "/a"}, {"url": self.base + "/b"}], degree=4)
+        self.assertEqual(len(calls), 2, "代理场景必须走 Session.request，而不是 httpx 直连")
+        self.assertEqual([r.status for r in out], [200, 200])
+
+    def test_rate_limit_uses_the_serial_session_path(self):
+        sess = self.session(limiter=ratemod.Limiter(rate=100))
+        calls: list[str] = []
+
+        def fake_request(url, **kwargs):
+            calls.append(url)
+            return Response(url, status=200, body=b"{}")
+
+        sess.request = fake_request
+        concurrency.fetch_many(sess, [{"url": self.base + "/a"}], degree=4)
+        self.assertEqual(len(calls), 1, "启用限速时必须走串行路径，否则等待会被并发绕过")
 
 
 class TestDegree(unittest.TestCase):

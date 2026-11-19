@@ -86,6 +86,13 @@ class TestJarRules(unittest.TestCase):
         self.assertEqual(jar.store("127.0.0.1", "/", False, ["sid=abc; Domain=127.0.0.1"]), 1)
         self.assertEqual(jar.header_for("127.0.0.1", "/", False), "sid=abc")
 
+    def test_a_host_with_a_port_is_not_an_ip_scope(self):
+        """`example.com:8443` must still accept a Domain cookie for example.com."""
+        jar = cookiejar.CookieJar(enabled=True, scope_domain="example.com:8443")
+        self.assertEqual(jar.store("app.example.com", "/", False,
+                                   ["sid=abc123; Domain=example.com"]), 1)
+        self.assertEqual(jar.header_for("app.example.com", "/", False), "sid=abc123")
+
     def test_secure_needs_tls_in_both_directions(self):
         jar = self._jar()
         self.assertEqual(jar.store("example.com", "/", False, ["sid=x; Secure"]), 0,

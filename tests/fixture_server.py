@@ -46,7 +46,8 @@ OPENAPI = {
 
 INDEX_HTML = """<!doctype html><html><head><title>Fixture Portal</title>
 <meta name="generator" content="Fixture 1.0">
-<script src="/static/app.min.js"></script></head>
+<script src="/static/app.min.js"></script>
+<script src="/static/missing.js"></script></head>
 <body><a href="/about">About</a><a href="/admin">Admin</a>
 <form action="/api/v1/login" method="post">
 <input name="username"><input name="password" type="password">

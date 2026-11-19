@@ -470,6 +470,15 @@ class TestSessionMetaInReport(unittest.TestCase):
         self.assertIn("Bearer", text)
         self.assertIn("100.0/s per host", text)
 
+    def test_handoff_does_not_claim_anonymous_when_identity_was_injected(self):
+        with open(os.path.join(self.out, "report", "handoff.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertNotIn("无认证态", text,
+                         "注入了身份后，handoff 不得再声称所有结果是匿名视角")
+        self.assertIn("已注入身份", text)
+        self.assertIn("未执行授权差分", text,
+                      "本次扫描关掉了验证，handoff 必须说清差分没做")
+
     def test_digest_ignores_who_we_were(self):
         from reconone.report import _digest_view
         other = json.loads(json.dumps(self.report))

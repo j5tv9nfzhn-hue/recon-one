@@ -4,15 +4,17 @@ from __future__ import annotations
 import json
 import os
 import time
+from . import discovery as discoverymod
 from . import doctor as doctormod
 from . import http as httpmod
 from . import score as scoremod
 from . import redact as redactmod
 from . import triage as triagemod
+from . import uncertainty as uncertaintymod
 from .config import (AUTHORIZED_USE, AUTHORIZED_USE_PREMISES, AUTHORIZED_USE_SHORT,
                      AUTHORIZED_USE_VERSION, SCHEMA_ID, VERSION)
-from .util import (VOLATILE_HEADERS, canonical_json, now_iso, redact_header, scrub_header_block,
-                   scrub_headers, scrub_urls, sha256_text)
+from .util import (VOLATILE_HEADERS, canonical_json, norm_endpoint, now_iso, redact_header,
+                   scrub_header_block, scrub_headers, scrub_urls, sha256_text)
 
 SCHEMA = {
     "$schema": "http://json-schema.org/draft-07/schema#",
@@ -282,7 +284,8 @@ def _scrub_hypothesis(item: dict) -> dict:
 def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, js, api,
              findings, hyp, session, started_at, elapsed, probe_status,
              intel: dict | None = None, authorized_by: str = "",
-             verification: dict | None = None, subdomain_probe=None) -> dict:
+             verification: dict | None = None, subdomain_probe=None,
+             discovery: dict | None = None) -> dict:
     sourcemaps = [s["sourcemap"] for s in js.get("scripts", []) if s.get("sourcemap")]
     # Passive assets and active-probe telemetry are computed once, here, so every consumer
     # (markdown, brief, console, compare view) reads the same numbers.
@@ -332,9 +335,19 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
     # Everything that quotes the response is scrubbed here, once, before it enters the report.
     findings = _scrub_findings(findings)
     hyp = [_scrub_hypothesis(item) for item in (hyp or [])]
+    discovery_block = discovery or {}
     endpoints = js.get("endpoints", [])
     for spec in api.get("specs", []):
         endpoints.extend(spec["endpoints"])
+    # Active content discovery is evidence too: merge the positive rows as low-confidence
+    # GET endpoints, but never claim `authz_open` — they were probed with whatever identity
+    # the scan carried, which is not necessarily anonymous.
+    known = {norm_endpoint(e.get("path") or "/") for e in endpoints}
+    for entry in discoverymod.endpoints(discovery_block):
+        if entry["path"] in known:
+            continue
+        known.add(entry["path"])
+        endpoints.append(entry)
     endpoints.sort(key=lambda e: (e["path"], e.get("confidence", "")))
     for i, endpoint in enumerate(endpoints, 1):
         endpoint["id"] = f"E-{i:04d}"
@@ -392,12 +405,14 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
                 "endpoints": len(endpoints), "parameters": len(api.get("parameters", [])),
                 "secrets": len(js.get("secrets", [])), "findings": len(findings),
                 "hypotheses": len(hyp), "sourcemaps": len(sourcemaps),
+                "discovered": sum(1 for e in endpoints if e.get("discovered")),
                 "specs": len(api.get("specs", [])),
                 "graphql": len((api.get("graphql") or {}).get("endpoints", [])),
                 "subdomains": len(subdomains),
                 "verified_usable": int(((verification or {}).get("summary") or {}).get("usable", 0)),
                 "verified_unusable": int(((verification or {}).get("summary") or {}).get("unusable", 0)),
                 "verified_skipped": int(((verification or {}).get("summary") or {}).get("skipped", 0)),
+                "scripts_failed": int((js.get("stats") or {}).get("failed", 0)),
                 "endpoints_testable": sum(1 for e in endpoints if e.get("params")),
                 "endpoints_write": sum(
                     1 for e in endpoints
@@ -405,8 +420,11 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
                            for m in (e.get("methods") or []) if m)),
             },
             "complete": all(v == "ok" for v in probe_status.values()),
-            "truncated": bool(session.exhausted or any(s.get("bytes", 0) for s in js.get("scripts", []))
-                              and js.get("stats", {}).get("fetched", 0) < js.get("stats", {}).get("requested", 0)),
+            # "Truncated" means a budget cut the scan short (bytes/time), not "a script URL
+            # returned 404". A single missing bundle used to flip `bet` from not_worth to
+            # withheld; fetch failures are reported as counts, never as budget exhaustion.
+            "truncated": bool(session.exhausted or
+                              (js.get("stats") or {}).get("budget_cut")),
         },
         "assets": assets,
         # Ranked, not discovery order: parameterised write endpoints first. The table is
@@ -421,6 +439,7 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
         # Error records carry URLs: a failed request to `https://u:p@host/?token=…` would
         # otherwise paste credentials into the report through the back door.
         "errors": scrub_urls(session.errors),
+        "discovery": discovery_block,
         "artifacts": [],
     }
     # Scoring is a pure function of the assembled report, so it can be recomputed offline
@@ -433,6 +452,9 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
     # The bet sheet: derived from the verification block and the endpoint list, so it is a pure
     # function of the evidence. Before redaction (it quotes paths) and before the digest.
     report["bet"] = triagemod.bet(report)
+    # What is still unmeasured, why it could change the bet, and what to do next. Built
+    # from the same evidence as `bet`; deterministic and explicitly non-probabilistic.
+    report["uncertainty"] = uncertaintymod.build(report, report["bet"])
     # Fifth redaction layer, two passes over the *whole* report, so fields added later
     # (JS-derived host URLs, third-party archive rows, well-known bodies) are covered by
     # default: (a) by shape, and (b) by the literal values this scan actually sent — a target
@@ -479,6 +501,33 @@ def _stable_profile(prof) -> dict:
     return view
 
 
+def _stable_discovery(block) -> dict:
+    """Observation-shaped projection: drop bodies, titles and byte counts.
+
+    A live page can change its title or size between two scans without changing the fact
+    that the path exists. Keeping those values in the digest would make "same target, same
+    package" false by construction.
+    """
+    if not isinstance(block, dict):
+        return {}
+    stats = block.get("stats") or {}
+    return {
+        "version": block.get("version", ""),
+        "enabled": bool(block.get("enabled", False)),
+        "status": str(block.get("status", "")),
+        "baseline": {key: (block.get("baseline") or {}).get(key)
+                     for key in ("path", "status", "soft_404")},
+        "baselines": [{key: baseline.get(key) for key in
+                       ("prefix", "path", "status", "soft_404", "blocked")}
+                      for baseline in block.get("baselines") or []],
+        "stats": {key: stats.get(key) for key in
+                  ("candidates", "dropped_by_cap", "probed", "present", "gated",
+                   "absent", "error", "skipped_by_baseline", "truncated", "requests")},
+        "rows": [{key: row.get(key) for key in ("path", "source", "status", "label", "soft_404")}
+                 for row in block.get("rows") or []],
+    }
+
+
 def _digest_view(report: dict) -> dict:
     """The report as it enters the determinism digest.
 
@@ -506,6 +555,8 @@ def _digest_view(report: dict) -> dict:
         view["intel"] = _stable_intel(report.get("intel"))
     if "profile" in report:
         view["profile"] = _stable_profile(report.get("profile"))
+    if "discovery" in report:
+        view["discovery"] = _stable_discovery(report.get("discovery"))
     if "verification" in report:
         view["verification"] = _stable_verification(report.get("verification"))
     headers = ((view.get("assets") or {}).get("http") or {}).get("headers")
@@ -624,6 +675,39 @@ def _verification_markdown(report: dict) -> list[str]:
             reason = str(entry.get("reason") or "").split("（")[0]
             reasons[reason] = reasons.get(reason, 0) + 1
         lines += ["跳过原因：" + "；".join(f"{k} × {v}" for k, v in sorted(reasons.items())), ""]
+    return lines
+
+
+def _discovery_markdown(report: dict) -> list[str]:
+    """Targeted content discovery: what was tried, what answered, and against which baseline."""
+    block = report.get("discovery") or {}
+    if not block or not block.get("enabled"):
+        return []
+    stats = block.get("stats") or {}
+    baseline = block.get("baseline") or {}
+    lines = ["", "## 定向内容发现", "",
+             f"- 状态：{block.get('status', '?')}；基线 {len(block.get('baselines') or [])} 条；"
+             f"根基线 `{baseline.get('path', '—')}` → HTTP {baseline.get('status', 0)}"
+             + ("（soft-404 基线）" if baseline.get("soft_404") else ""),
+             f"- 候选 {stats.get('candidates', 0)} 个（被上限丢弃 {stats.get('dropped_by_cap', 0)}）"
+             f"，探测 {stats.get('probed', 0)}，存在 {stats.get('present', 0)}，"
+             f"受保护 {stats.get('gated', 0)}，不存在 {stats.get('absent', 0)}，"
+             f"错误 {stats.get('error', 0)}"
+             + (f"（前缀基线拦截跳过 {stats.get('skipped_by_baseline')}）"
+                if stats.get("skipped_by_baseline") else "")]
+    if block.get("reason"):
+        lines.append(f"- 未探测原因：{block['reason']}")
+    rows = [row for row in block.get("rows") or []
+            if row.get("label") in ("present", "gated")][:20]
+    if rows:
+        lines += ["", "| 路径 | 来源 | 状态 | 判定 |", "|---|---|---:|---|"]
+        lines += [f"| `{row.get('path', '')}` | {row.get('source', '')} | "
+                  f"{row.get('status', 0)} | {row.get('label', '')} |" for row in rows]
+        if stats.get("present", 0) + stats.get("gated", 0) > len(rows):
+            lines.append(f"| …另有 {stats.get('present', 0) + stats.get('gated', 0) - len(rows)} 条 | | | |")
+    if stats.get("truncated"):
+        lines.append("- 预算/时间在候选耗尽前中断；未探测部分不是“不存在”。")
+    lines.append("")
     return lines
 
 
@@ -792,6 +876,7 @@ def render_markdown(report: dict) -> str:
              f"- 覆盖完整：{report['coverage']['complete']}，截断：{report['coverage']['truncated']}", ""]
     lines += _authorization_markdown(report)
     lines += _bet_markdown(report)
+    lines += _uncertainty_markdown(report)
     lines += ["## 覆盖计数", "",
               "| 项 | 数量 |", "|---|---|"]
     for key, value in c.items():
@@ -799,6 +884,7 @@ def render_markdown(report: dict) -> str:
     lines += _score_markdown(report)
     lines += _profile_markdown(report)
     lines += _verification_markdown(report)
+    lines += _discovery_markdown(report)
     lines += _session_markdown(report)
     lines += ["", "## 技术栈", ""]
     lines += [f"- {tech['name']}（{', '.join(tech['evidence'])}）" for tech in report["assets"]["technology"]] or ["- 未识别"]
@@ -847,7 +933,7 @@ def _bet_markdown(report: dict) -> list[str]:
     if counts:
         out.append(f"- 计数：带参数可用 {counts.get('parameterised_usable', 0)} / "
                    f"匿名开放 {counts.get('anonymous_open', 0)} / "
-                   f"被拦截 {counts.get('gated', 0)} / 未判定 {counts.get('undecided', 0)} / "
+                   f"未开放 {counts.get('not_open', 0)} / 未判定 {counts.get('undecided', 0)} / "
                    f"其中写端点 {counts.get('anonymous_open_write', 0)}")
     if bet.get("unknowns"):
         out.append("- 还不确定：" + "；".join(bet["unknowns"]))
@@ -856,6 +942,45 @@ def _bet_markdown(report: dict) -> list[str]:
         out += [f"  - {item}" for item in bet["kill_criteria"]]
     out.append("")
     return out
+
+
+def _uncertainty_markdown(report: dict) -> list[str]:
+    """What is still unmeasured, ranked by impact and request cost (never a probability)."""
+    block = report.get("uncertainty") or {}
+    if not block:
+        return []
+    facts = block.get("facts") or {}
+    pct = lambda value: "—" if value is None else f"{value}%"
+    stages = facts.get("stages_incomplete") or []
+    lines = ["", "## 未知面与下一步", "",
+             f"- 带参端点已判定 {facts.get('parameterised_answered', 0)}/"
+             f"{facts.get('parameterised_total', 0)}"
+             f"（{pct(facts.get('parameterised_checked_pct'))}）；"
+             f"子域已探 {facts.get('subdomains_probed', 0)}/{facts.get('subdomains_total', 0)}"
+             f"（{pct(facts.get('subdomains_checked_pct'))}）",
+             f"- 未完成阶段：{', '.join(stages) if stages else '无'}"
+             f"；预算截断：{facts.get('truncated', False)}"]
+    actions = block.get("next_actions") or []
+    if actions:
+        lines += ["", "| # | 影响 | 预计请求 | 未知项 | 下一步 | 样本 |",
+                  "|---:|---|---:|---|---|---|"]
+        for item in actions:
+            samples = "、".join(item.get("samples") or [])[:120]
+            lines.append(f"| {item.get('rank')} | {item.get('impact')} | "
+                         f"{item.get('cost_requests')} | {item.get('title')} | "
+                         f"{item.get('action')} | {samples} |")
+    flips = block.get("verdict_flips") or []
+    if flips:
+        lines += ["", "改判路径："]
+        for flip in flips:
+            lines.append(f"- `{flip.get('from')}` → `{flip.get('to')}`：{flip.get('condition')}"
+                         f"（约 {flip.get('cost_requests', 0)} 次请求；"
+                         f"未知项 {', '.join(flip.get('unknowns') or [])}）")
+    if block.get("notes"):
+        lines.append("")
+        lines += [f"- {note}" for note in block["notes"]]
+    lines.append("")
+    return lines
 
 
 def render_handoff(report: dict) -> str:
@@ -883,16 +1008,57 @@ def render_handoff(report: dict) -> str:
     tech = ", ".join(t["name"] for t in report["assets"]["technology"][:12])
     if tech:
         lines.append(f"- 技术栈：{tech}")
+    discovery = report.get("discovery") or {}
+    if discovery.get("enabled"):
+        dstats = discovery.get("stats") or {}
+        lines.append(f"- 内容发现：候选 {dstats.get('candidates', 0)}，探测 "
+                     f"{dstats.get('probed', 0)}，存在 {dstats.get('present', 0)}，"
+                     f"受保护 {dstats.get('gated', 0)}（基线 HTTP "
+                     f"{(discovery.get('baseline') or {}).get('status', 0)}）")
     lines += ["", "## 2. 未覆盖与不确定项（不要当成结论）", ""]
+    if discovery and discovery.get("status") not in (None, "", "ok", "empty"):
+        lines.append(f"- `discovery`：{discovery.get('status')}"
+                     + (f"（{discovery.get('reason')}）" if discovery.get("reason") else ""))
     for name, status in sorted(report["coverage"]["probes"].items()):
         if status != "ok":
             lines.append(f"- `{name}`：{status}")
     if report["coverage"]["truncated"]:
         lines.append("- 本次扫描触达预算上限（字节/时间），结果不完整。")
+    session_meta = (report.get("meta") or {}).get("session") or {}
+    verification = report.get("verification") or {}
+    model = str((verification.get("summary") or {}).get("identity_model") or "single")
+    if session_meta.get("enabled") and model == "dual" and verification.get("enabled"):
+        auth_line = ("- 认证态：已注入身份，并在验证阶段做了双身份（认证 / 匿名）授权差分；"
+                     "未注入身份的阶段仍是匿名视角，登录后的功能面未完整测绘。")
+    elif session_meta.get("enabled"):
+        auth_line = ("- 认证态：已注入身份，但验证阶段未执行授权差分；"
+                     "匿名可访问性未证明，登录后的功能面未完整测绘。")
+    else:
+        auth_line = "- 无认证态：所有结果均为匿名视角，登录后的功能面未测绘。"
     lines += [
-        "- 无认证态：所有结果均为匿名视角，登录后的功能面未测绘。",
+        auth_line,
         "- 未做漏洞验证：本程序只测绘与推断，不发送攻击载荷。",
         "",
+    ]
+    unc = report.get("uncertainty") or {}
+    if unc:
+        ufacts = unc.get("facts") or {}
+        lines += ["## 2.1 未知面与改判路径（不是概率）", "",
+                  f"- 带参端点已判定 {ufacts.get('parameterised_answered', 0)}/"
+                  f"{ufacts.get('parameterised_total', 0)}；子域已探 "
+                  f"{ufacts.get('subdomains_probed', 0)}/{ufacts.get('subdomains_total', 0)}；"
+                  f"未完成阶段 {', '.join(ufacts.get('stages_incomplete') or []) or '无'}",
+                  ""]
+        for item in unc.get("next_actions") or []:
+            samples = "；样本：" + "、".join(item.get("samples") or []) if item.get("samples") else ""
+            lines.append(f"- **{item.get('rank')}. {item.get('title')}**"
+                         f"（{item.get('impact')} 影响，约 {item.get('cost_requests')} 次请求）"
+                         f"：{item.get('action')}{samples}")
+        for flip in unc.get("verdict_flips") or []:
+            lines.append(f"- 改判路径 `{flip.get('from')}` → `{flip.get('to')}`："
+                         f"{flip.get('condition')}（约 {flip.get('cost_requests', 0)} 次请求）")
+        lines.append("")
+    lines += [
         "## 3. 建议动作（按 优先级得分 排序，blocked=True 需先取得访问条件）",
         "",
         "| # | 动作 | 得分 | 成本 | 增益 | 需要 | 阻塞 |",

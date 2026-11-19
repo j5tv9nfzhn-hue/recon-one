@@ -44,8 +44,15 @@ INTERNAL_HINTS = (
     "qa", "test", "demo", "sandbox", "beta",
 )
 
-#: Substrings that mean "a login wall is here", used to label a page gated even on 200.
-LOGIN_HINTS = ("sign in", "login", "log in", "please authenticate")
+#: Host labels that mean "this host is an authentication endpoint". Deliberately host-only:
+#: a "Login" link in a marketing page's navigation is not a login wall, and matching that
+#: text classified nearly every public site as gated (which promoted it to `worth`).
+LOGIN_HOST_HINTS = ("login", "signin", "sign-in", "logon")
+#: A page whose *title* is a sign-in prompt is a login wall even on a public-looking host.
+_LOGIN_TITLE = re.compile(
+    r"(?i)^\s*(?:sign\s+in|log\s+in|login|logon|please\s+authenticate)\b")
+#: This phrase is specific enough to trust in a body, unlike the word "login".
+_LOGIN_MARKER = "please authenticate"
 
 _TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _GATED_STATUS = (401, 403)
@@ -83,8 +90,13 @@ def classify(status: int, host: str, title: str, body: bytes = b"") -> tuple[str
         haystack = f"{host} {title}".lower()
         if any(hint in haystack for hint in INTERNAL_HINTS):
             return "exposed", True
+        # Structural signals only. A nav link containing "Login" is content, not a wall;
+        # matching it made every marketing subdomain a non-public face and flipped the bet.
+        if (any(hint in host.lower() for hint in LOGIN_HOST_HINTS)
+                or _LOGIN_TITLE.match(title)):
+            return "gated", True
         snippet = body[:8000].decode("utf-8", "replace").lower()
-        if any(hint in snippet for hint in LOGIN_HINTS):
+        if _LOGIN_MARKER in snippet:
             return "gated", True
         return "public", False
     if status == 404:

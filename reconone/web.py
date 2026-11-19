@@ -29,6 +29,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import cli, config, egress as egressmod, score
+from . import triage as triagemod
+from . import uncertainty as uncertaintymod
+from . import verify as verifymod
 from .auth import Auth, AuthError
 from .util import ensure_dir
 
@@ -52,6 +55,31 @@ _RUN_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
 def _norm_target(value: str) -> str:
     """Host-only, lowercase, no scheme/path — same rule the CLI applies."""
     return cli._normalise_domain(str(value or ""))
+
+
+BET_LABELS = {"worth": "值得打", "not_worth": "不值", "withheld": "证据不足"}
+
+
+def _bet_label(bet: dict) -> str:
+    gross = str((bet or {}).get("verdict") or "")
+    return BET_LABELS.get(gross, "")
+
+
+def _recompute_derived(report: dict) -> dict:
+    """Recompute conclusions that are pure functions of the stored evidence.
+
+    `score` was already recomputed on read; `profile` and `bet` were not, so an old package
+    could keep a conclusion the current rules would never reach. Re-stamp `authz_open` from
+    the stored verification block first: reports written before the split only have
+    `verified`, and treating that as "anonymous open" would resurrect the old bug.
+    """
+    verification = report.get("verification") or {}
+    if verification:
+        verifymod.annotate(report.get("endpoints") or [], verification)
+    report["bet"] = triagemod.bet(report)
+    report["uncertainty"] = uncertaintymod.build(report, report["bet"])
+    report["profile"] = triagemod.build(report, report.get("intel") or {})
+    return report
 
 
 class Job:
@@ -210,7 +238,8 @@ class Handler(BaseHTTPRequestHandler):
             if not os.path.isdir(full):
                 continue
             entry = {"run": name, "has_report": False, "domain": "", "generated_at": "",
-                     "verdict": "", "counts": {}, "bytes": 0, "mtime": 0.0}
+                     "verdict": "", "score_verdict": "", "bet": "",
+                     "counts": {}, "bytes": 0, "mtime": 0.0}
             try:
                 entry["mtime"] = os.path.getmtime(full)
                 entry["bytes"] = self._dir_size(full)
@@ -228,8 +257,18 @@ class Handler(BaseHTTPRequestHandler):
                     entry["domain"] = ((rep.get("target") or {}).get("domain") or "")
                     entry["generated_at"] = ((rep.get("meta") or {}).get("generated_at") or "")
                     entry["counts"] = (rep.get("coverage") or {}).get("counts") or {}
-                    entry["verdict"] = (((rep.get("score") or {}).get("triage") or {})
-                                        .get("label") or "")
+                    score_label = str(((rep.get("score") or {}).get("triage") or {})
+                                      .get("label") or "")
+                    entry["score_verdict"] = score_label
+                    try:
+                        rep.pop("score", None)
+                        rep["score"] = score.score_report(rep)
+                        _recompute_derived(rep)
+                        bet = rep.get("bet") or {}
+                        entry["bet"] = str(bet.get("verdict") or "")
+                        entry["verdict"] = _bet_label(bet) or score_label
+                    except Exception:                 # noqa: BLE001 - one bad row must not 500
+                        entry["verdict"] = score_label
             out.append(entry)
         out.sort(key=lambda r: r["mtime"], reverse=True)
         return out
@@ -440,6 +479,7 @@ class Handler(BaseHTTPRequestHandler):
                 [str(h) for h in (body.get("headers") or [])],
                 float(body.get("rate") or 0), float(body.get("max_backoff") or 8),
                 bool(body.get("use_cookies", True)),
+                bool(body.get("use_discovery", True)), int(body.get("discovery_max") or 0),
             ))
             job.thread.start()
         self._json(200, {"ok": True, "targets": targets, "parallel": job.parallel,
@@ -450,7 +490,7 @@ class Handler(BaseHTTPRequestHandler):
                    use_js=True, use_intel=True, geo=False, cve=False, authorized_by="",
                    egress=None, use_verify=True, verify_max=40,
                    cookie="", bearer="", headers=(), rate=0.0, max_backoff=8.0,
-                   use_cookies=True):
+                   use_cookies=True, use_discovery=True, discovery_max=0):
         job: Job = self.server.job
         out_root = ensure_dir(os.path.join(self.server.root, "runs"))
 
@@ -493,7 +533,8 @@ class Handler(BaseHTTPRequestHandler):
                     verify_max=verify_max,
                     cookie=cookie, bearer=bearer, headers=headers, rate=rate,
                     max_backoff=max_backoff, injection_source="web",
-                    use_cookies=use_cookies,
+                    use_cookies=use_cookies, use_discovery=use_discovery,
+                    discovery_max=discovery_max,
                     on_event=lambda ev: on_event(entry, ev), cancel=job.cancel,
                 )
             except cli.ScanCancelled:
@@ -502,14 +543,16 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:                  # noqa: BLE001 - surfaced per target
                 note(entry, state="error", error=f"{type(exc).__name__}: {exc}")
                 return
-            triage = ((report.get("score") or {}).get("triage") or {})
+            score_triage = ((report.get("score") or {}).get("triage") or {})
+            bet = report.get("bet") or {}
             reason = {2: "部分探测失败，报告仍可用（coverage.probes 列出未覆盖项）",
                       3: "扫描被拒绝：目标不可达或运行目录不合规"}.get(code, "")
             note(entry, progress=100,
                  state="cancelled" if job.cancel.is_set() else
                        ("done" if code == 0 else ("partial" if code == 2 else "error")),
                  error=reason if code not in (0,) else "",
-                 verdict=triage.get("label", ""), summary=(report.get("score") or {}).get("summary", ""))
+                 verdict=_bet_label(bet) or score_triage.get("label", ""),
+                 summary=(report.get("score") or {}).get("summary", ""))
 
         try:
             with ThreadPoolExecutor(max_workers=job.parallel) as pool:
@@ -555,6 +598,10 @@ class Handler(BaseHTTPRequestHandler):
             report["score"] = score.score_report(report)
         except Exception as exc:                      # noqa: BLE001 - degrade, do not crash
             report["score_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            _recompute_derived(report)
+        except Exception as exc:                      # noqa: BLE001 - keep the report readable
+            report["derive_error"] = f"{type(exc).__name__}: {exc}"
         report["run"] = {"name": os.path.basename(run_dir), "dir": run_dir}
         return self._json(200, report)
 
@@ -592,14 +639,28 @@ class Handler(BaseHTTPRequestHandler):
                 report["score"] = score.score_report(report)
             except Exception as exc:                  # noqa: BLE001 - one bad row, not a 500
                 row["error"] = f"score failed: {type(exc).__name__}"
+            try:
+                _recompute_derived(report)
+            except Exception as exc:                  # noqa: BLE001 - degrade this row only
+                row["derive_error"] = f"derive failed: {type(exc).__name__}"
             score_block = report.get("score") or {}
             axes = score_block.get("axes") or {}
             prof = report.get("profile") or {}
             pax = prof.get("axes") or {}
             success = prof.get("success") or {}
             weights = prof.get("weights") or {}
+            bet = report.get("bet") or {}
+            uncertainty = report.get("uncertainty") or {}
+            next_action = (uncertainty.get("next_actions") or [{}])[0]
+            score_label = str((score_block.get("triage") or {}).get("label") or "")
             row.update({
-                "verdict": (score_block.get("triage") or {}).get("label", ""),
+                "verdict": _bet_label(bet) or score_label,
+                "bet": str(bet.get("verdict") or ""),
+                "bet_confidence": str(bet.get("confidence") or ""),
+                "bet_identity": str(bet.get("identity") or ""),
+                "unknowns": len(uncertainty.get("unknowns") or []),
+                "next_action": str(next_action.get("title") or ""),
+                "score_verdict": score_label,
                 "hygiene": (axes.get("hygiene") or {}).get("score"),
                 "hygiene_grade": (axes.get("hygiene") or {}).get("grade") or "",
                 "opportunity": (axes.get("opportunity") or {}).get("score"),
@@ -618,7 +679,7 @@ class Handler(BaseHTTPRequestHandler):
             "runs": rows,
             "selected": job.selected,
             "axes": ["worth", "ease", "index"],
-            "note": ("列均按当前评分模型重算；`index` 为机会指数（非概率），"
+            "note": ("列均按当前模型重算（score / profile / bet）；`index` 为机会指数（非概率），"
                      "`observed_share_pct` 表示该结论里来自主动实测的权重占比。"),
         })
 

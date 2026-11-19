@@ -198,8 +198,10 @@ class TestBet(unittest.TestCase):
 
     @staticmethod
     def _endpoint(path="/api/v1/orders", **over):
+        # `authz_open=True` mirrors what annotate() stamps for a 2xx/3xx anonymous response;
+        # "usable" alone means "the path exists" and is not a bet hit.
         entry = {"path": path, "methods": ["GET"], "params": [{"name": "id"}],
-                 "verified": "usable"}
+                 "verified": "usable", "authz_open": True}
         entry.update(over)
         return entry
 
@@ -224,8 +226,50 @@ class TestBet(unittest.TestCase):
             assets={"subdomains": [{"host": "h.example.com", "probed": True}]})
         bet = triage.bet(report)
         self.assertEqual(bet["criteria"][0]["status"], "miss")
-        self.assertEqual(bet["counts"]["gated"], 1)
+        self.assertEqual(bet["counts"]["not_open"], 1)
         self.assertEqual(bet["verdict"], "not_worth")
+
+    def test_single_identity_401_is_not_anonymous_open(self):
+        """Existence (usable) must not be enough: a 401 is evidence of a gate, not of access."""
+        bet = triage.bet(self._report(endpoints=[self._endpoint(authz_open=False)]))
+        self.assertEqual(bet["criteria"][0]["status"], "miss")
+        self.assertEqual(bet["counts"]["not_open"], 1)
+        self.assertEqual(bet["counts"]["anonymous_open"], 0)
+        self.assertEqual(bet["verdict"], "not_worth")
+
+    def test_dual_identity_identical_answers_are_not_anonymous_open(self):
+        """`same` means both identities see the same shell; it is not a content difference."""
+        report = self._report(
+            meta={"session": {"enabled": True}},
+            verification={"enabled": True, "summary": {"identity_model": "dual", "probed": 1}},
+            endpoints=[self._endpoint(authz_open=False,
+                                      authz={"label": "same", "anon_status": 200})])
+        bet = triage.bet(report)
+        self.assertEqual(bet["criteria"][0]["status"], "miss")
+        self.assertEqual(bet["verdict"], "not_worth")
+
+    def test_an_unverified_parameterised_endpoint_blocks_a_negative(self):
+        """One skipped parameterised endpoint is a possible hit; the verdict must be withheld."""
+        report = self._report(
+            meta={"session": {"enabled": True}},
+            verification={"enabled": True, "summary": {"identity_model": "dual", "probed": 1}},
+            endpoints=[self._endpoint("/a", authz_open=False),
+                       self._endpoint("/b", verified="skipped")])
+        bet = triage.bet(report)
+        self.assertEqual(bet["criteria"][0]["status"], "unknown")
+        self.assertEqual(bet["verdict"], "withheld")
+        self.assertIn("未验证", "；".join(bet["unknowns"]))
+
+    def test_a_host_with_a_port_is_not_an_ip(self):
+        """`example.com:8443` has a subdomain dimension; only a real IP literal does not."""
+        report = self._report(
+            target={"domain": "example.com:8443"},
+            assets={"subdomains": [{"host": "admin.example.com", "probed": False}]},
+            intel={"ct": {"status": "ok", "subdomains": ["admin.example.com"]}})
+        bet = triage.bet(report)
+        self.assertEqual(bet["criteria"][1]["status"], "unknown")
+        self.assertNotIn("IP 目标", bet["criteria"][1]["detail"])
+        self.assertIn("子域面未评估", "；".join(bet["unknowns"]))
 
     def test_anonymous_open_under_dual_identity_is_a_hit(self):
         report = self._report(

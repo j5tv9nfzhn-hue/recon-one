@@ -57,9 +57,26 @@ class TestClassification(unittest.TestCase):
         self.assertEqual(subs.classify(0, "x.example.com", ""), ("dead", False))
         self.assertEqual(subs.classify(500, "x.example.com", ""), ("error", False))
 
-    def test_a_login_wall_in_the_body_counts_as_gated(self):
-        body = b"<html><title>Welcome</title><form>Sign in</form></html>"
-        self.assertEqual(subs.classify(200, "x.example.com", "Welcome", body)[0], "gated")
+    def test_a_login_titled_page_counts_as_gated(self):
+        body = b"<html><title>Sign in</title><form>...</form></html>"
+        self.assertEqual(subs.classify(200, "x.example.com", "Sign in", body)[0], "gated")
+
+    def test_a_login_host_with_a_plain_page_is_gated(self):
+        body = b"<html><title>Welcome</title><input type='password'></html>"
+        self.assertEqual(subs.classify(200, "login.example.com", "Welcome", body)[0], "gated")
+
+    def test_a_nav_login_link_does_not_make_a_marketing_page_gated(self):
+        """The word "Login" in a nav is content, not a wall. This was a real false positive."""
+        body = (b'<html><title>Acme - Home</title><nav><a href="/login">Login</a>'
+                b'<a href="/signup">Sign up</a></nav><h1>Welcome</h1></html>')
+        label, non_public = subs.classify(200, "www.example.com", "Acme - Home", body)
+        self.assertEqual((label, non_public), ("public", False))
+
+    def test_a_password_input_alone_does_not_make_a_page_gated(self):
+        """Login modals on public pages exist; a password input without a login signal is not enough."""
+        body = b'<html><title>Acme - Home</title><div class="modal"><input type="password"></div></html>'
+        label, non_public = subs.classify(200, "www.example.com", "Acme - Home", body)
+        self.assertEqual((label, non_public), ("public", False))
 
 
 class TestScope(unittest.TestCase):
