@@ -28,7 +28,7 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import cli, config, score
+from . import cli, config, egress as egressmod, score
 from .auth import Auth, AuthError
 from .util import ensure_dir
 
@@ -77,6 +77,7 @@ class Job:
         self.out_dir = ""
         self.started = 0.0
         self.parallel = 1
+        self.egress = None
 
     def snapshot(self) -> dict:
         return {
@@ -398,6 +399,22 @@ class Handler(BaseHTTPRequestHandler):
             allow_external = bool(body.get("allow_external"))
             if allow_external and not body.get("confirm_external"):
                 return self._json(400, {"error": "越界请求需要二次确认"})
+            # Egress: same rules as the CLI. Resolved once per batch so every target in it
+            # leaves through the same route (and the report can say which).
+            proxy_url = str(body.get("proxy") or os.environ.get("RECONONE_PROXY") or "").strip()
+            if proxy_url:
+                mode = "manual"
+            elif body.get("direct"):
+                mode = "direct"
+            elif body.get("proxy_from_system"):
+                mode = "system"
+            else:
+                mode = "auto"
+            try:
+                egress = egressmod.resolve(mode, proxy_url, str(body.get("proxy_bypass") or ""))
+            except ValueError as exc:
+                return self._json(400, {"error": f"代理配置无效：{exc}"})
+            job.egress = egress
 
             job.events = []
             job.summary = {}
@@ -417,14 +434,16 @@ class Handler(BaseHTTPRequestHandler):
                 bool(body.get("use_graphql", True)), bool(body.get("verify_tls", True)),
                 bool(body.get("use_js", True)), bool(body.get("use_intel", True)),
                 bool(body.get("geo", False)), bool(body.get("cve", False)),
-                str(body.get("authorized_by") or ""),
+                str(body.get("authorized_by") or ""), egress,
             ))
             job.thread.start()
-        self._json(200, {"ok": True, "targets": targets, "parallel": job.parallel})
+        self._json(200, {"ok": True, "targets": targets, "parallel": job.parallel,
+                         "egress": job.egress.label() if job.egress else "直连"})
 
     # ------------------------------------------------------------------ batch runner
     def _run_batch(self, targets, profile, allow_external, use_dns, use_graphql, verify_tls,
-                   use_js=True, use_intel=True, geo=False, cve=False, authorized_by=""):
+                   use_js=True, use_intel=True, geo=False, cve=False, authorized_by="",
+                   egress=None):
         job: Job = self.server.job
         out_root = ensure_dir(os.path.join(self.server.root, "runs"))
 
@@ -463,7 +482,7 @@ class Handler(BaseHTTPRequestHandler):
                     allow_external=allow_external, verify_tls=verify_tls,
                     use_dns=use_dns, use_graphql=use_graphql, quiet=True,
                     use_js=use_js, use_intel=use_intel, geo=geo, cve=cve,
-                    authorized_by=authorized_by,
+                    authorized_by=authorized_by, egress=egress,
                     on_event=lambda ev: on_event(entry, ev), cancel=job.cancel,
                 )
             except cli.ScanCancelled:

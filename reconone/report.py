@@ -5,6 +5,7 @@ import json
 import os
 import time
 from . import doctor as doctormod
+from . import http as httpmod
 from . import score as scoremod
 from . import redact as redactmod
 from . import triage as triagemod
@@ -339,6 +340,7 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
             "deps": deps,
             "probe_stats": probe_stats,
             "redaction": redactmod.scope_note(),
+            "egress": httpmod.egress_view(session),
             # The premises this run rested on, recorded rather than assumed. `authorized_by`
             # is free text (ticket id, contract reference, pentest window) so an auditor can
             # tie the package to the paper that allowed it.
@@ -452,7 +454,7 @@ def _digest_view(report: dict) -> dict:
     # digest" keeps meaning what it says.
     view["meta"] = {kk: vv for kk, vv in report["meta"].items()
                     if kk not in ("generated_at", "started_at", "elapsed_seconds",
-                                  "probe_stats", "deps", "authorization")}
+                                  "probe_stats", "deps", "authorization", "egress")}
     # Who was authorised to look is not a property of the target: two operators scanning the
     # same site with different paperwork must digest the same. The notice version stays, so a
     # change in the wording of the notice is still visible in the digest.

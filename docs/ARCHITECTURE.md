@@ -58,8 +58,9 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 |---|---:|---:|---|
 | `util.py` | 334 | 8 | 哈希、密钥脱敏、**响应头/URL/证据片段脱敏**、URL 归一化、确定性 JSON、JS 美化、端点归一 |
 | `redact.py` | 111 | 1 | 第五层兜底脱敏：按形状扫描整份报告（Bearer/JWT/`token=`/凭据键名/任意 URL），并输出可机读的 `meta.redaction` |
+| `egress.py` | 296 | 2 | 出口策略：`--proxy`/系统代理（env + WinINET）/`--direct`/bypass、SOCKS5 握手（自实现，无额外依赖）、`meta.egress` |
 | `config.py` | 199 | 8 | 版本号、**授权声明常量**、三档扫描预算、输出根解析、规则加载（带缓存） |
-| `http.py` | 275 | 3 | 作用域守卫的 HTTP 客户端，字节/时间预算、手动跟随重定向、解压上限、TLS 证书探测 |
+| `http.py` | 375 | 3 | 作用域守卫的 HTTP 客户端：代理三路由（直连/CONNECT/绝对 URI/SOCKS5）、失败分类、回退重试、字节/时间预算、手动重定向、解压上限、TLS 证书探测 |
 | `dns.py` | 283 | 1 | 自实现 DNS 线格式（A/AAAA/CNAME/MX/NS/TXT/SOA），校验应答源与 txid，无 dnspython |
 | `concurrency.py` | 170 | 1 | 并发抓取（httpx + anyio，硬依赖）：同序返回、共享字节预算 |
 | `webprobe.py` | 269 | 1 | 首页抓取、安全头按值评分、Cookie 标志、技术指纹、well-known、CORS 实测 |
@@ -70,11 +71,11 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 | `triage.py` | 393 | 1 | 目标画像：10 项价值 + 9 项难度规则表（含两项主动实测）、覆盖率门槛、机会指数（非概率）、passive/active 与权重占比 |
 | `hypotheses.py` | 165 | 1 | 决策层：把事实转成带前置条件、验证步骤、成本与增益的假设 |
 | `score.py` | 782 | 2 | 证据门控评分：18 个原子检查、两轴、覆盖率门槛、triage 规则树 |
-| `report.py` | 785 | 1 | 报告组装、画像注入（`profile`）、子域资产、主动遥测、**授权块与五层脱敏**、Schema 校验、markdown/handoff 渲染、manifest |
+| `report.py` | 787 | 1 | 报告组装、画像注入（`profile`）、子域资产、主动遥测、`meta.egress`、**授权块与五层脱敏**、Schema 校验、markdown/handoff 渲染、manifest |
 | `brief.py` | 385 | 1 | AI 简报：授权行 + 画像摘要 + 按决策价值排序、硬字符预算、显式省略计数 |
 | `doctor.py` | 148 | 2 | 依赖自检：行为级验证 httpx 客户端、anyio TaskGroup+限流器、DNS 套接字、TLS 校验；不联网 |
-| `cli.py` | 514 | 2 | 参数解析（含 `--authorized-by`）、阶段编排、`doctor` 子命令、授权横幅、事件回调、退出码 |
-| `web.py` | 708 | 2 | 控制台后端：静态资源 + JSON API（统一鉴权）、多目标并行批次、产物管理、读时重算评分、`/api/compare`、授权声明透出 |
+| `cli.py` | 542 | 2 | 参数解析（含 `--authorized-by` / `--proxy` 系列）、出口解析、阶段编排、`doctor` 子命令、授权横幅、事件回调、退出码 |
+| `web.py` | 727 | 2 | 控制台后端：静态资源 + JSON API（统一鉴权）、多目标并行批次（含出口解析）、产物管理、读时重算评分、`/api/compare` |
 | `auth.py` | 228 | 1 | 一次性配对令牌、PBKDF2 密码、30 天持久会话（哈希落盘）与失败限流 |
 
 `web.py` 与 `cli.py` 之间是**单向**依赖：控制台不含任何探测逻辑，所以命令行与浏览器产出**字节一致**的报告。
@@ -209,6 +210,7 @@ max_js_bytes / max_total_bytes / timeout / budget_seconds` 写死，并回显在
 同一目标两次扫描必须得到相同摘要——这让报告可归档、可 diff、可进版本库。
 
 ### 4.8 被动与主动是两件事
+
 `intel.py` 是唯一把数据交给第三方的模块，且**不向目标发包**；`triage.py` 的每项检查都带
 `mode: passive|active`，画像里给出 `mode_split.passive / mode_split.active`。于是「只用第三方
 索引」与「直连目标实测」永远可分辨：前者可离线复现、不惊动目标，后者的每一次请求都记在
@@ -220,6 +222,18 @@ max_js_bytes / max_total_bytes / timeout / budget_seconds` 写死，并回显在
 `session.log` 汇总每个状态码的计数，`hard.active_blocking` 只读这份汇总——所以「主动探测进入评分」
 不新增任何请求，只把已发出的请求变成证据。依赖是否可用由 `doctor.py` 单独回答（`python -m reconone
 doctor`，退出码 4 表示不可用），版本随 `meta.deps` 写进报告，但不进 `deterministic_digest`。
+
+### 4.9 出口与失败分类（2026-11）
+传输是 `http.client`，所以代理必须自己接：http 走绝对 URI 转发、https 走 `CONNECT` 隧道、
+socks5 走自实现握手（`egress.socks5_tunnel`，不引入 `socksio`）。
+
+失败分类不是给日志看的：`connect-timeout` / `reset` / `refused` 说明**连接没建立**，`auto` 模式只对
+这三类做一次回退重试；`tls` 握手错误与 HTTP 状态说明**有东西回答了**，换路由只会得到第二个错答案，
+错答案，因此不重试。代理返回 5xx 记 `proxy-error` 而不是当页面——否则「不可达」会变成「可扫」，
+整份报告都在评估一个错误页。
+
+`meta.egress` 只写 host:port 与来源，**凭据永不进报告**；它与 `probe_stats` 一样不参与
+`deterministic_digest`：描述这次运行，不描述目标。
 
 ---
 

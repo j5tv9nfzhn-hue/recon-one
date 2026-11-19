@@ -111,7 +111,8 @@ recon-one/
 | `tests/test_triage.py` | 11 | 权重恒定、指数与带、覆盖率不足拒绝出结论、WAF/版本抬难度、端点面抬价值、`unknown≠fail`、同输入同输出、**主动项接线与权重占比** |
 | `tests/test_doctor.py` | 5 | 五项行为检查全过、版本可读、坏检查被报告而不抛出、CLI 退出码 0/4 |
 | `tests/test_redaction.py` | 20 | 四层定点脱敏（头/URL/证据/密钥）+ **第五层整份报告形状扫描**：`hosts[].url`、`intel.archive` 行、`well_known` 正文里的凭据都不出现，计数/路径/Cookie 属性保留，清洗幂等，`meta.redaction` 例外可机读 |
-| **合计** | **150** | `python -m unittest discover -s tests -t .` 全绿（约 86s） |
+| `tests/test_egress.py` | 16 | E1 代理全量转发（目标零直连、绝对 URI、CONNECT）、E2 系统代理发现/auto 回退/direct/bypass/PAC 标注、E3 SOCKS5 隧道、E4 失败分类 + 只对连接级失败回退一次 + 代理 5xx 记 proxy-error + 凭据不进报告 |
+| **合计** | **166** | `python -m unittest discover -s tests -t .` 全绿（约 56s） |
 
 新增的关键回归：
 

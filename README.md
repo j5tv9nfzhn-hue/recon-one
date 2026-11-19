@@ -36,11 +36,17 @@ cd recon-one
 python -m reconone doctor                     # 先确认 httpx/anyio/ssl/dns 真的能用（1 秒，不联网）
 python -m reconone ui                         # 启动 Web 控制台（前后端同一进程）
 python -m reconone scan --domain example.com --profile default   # 纯命令行
-python -m unittest discover -s tests -t .     # 150 项测试（全部本地、不联网）
+python -m unittest discover -s tests -t .     # 166 项测试（全部本地、不联网）
 ```
 
 常用开关（`scan`）：`--no-js` 不下载前端 bundle、`--no-intel` 关闭被动情报、`--geo` 查 IP 地理位置、
-`--cve` 查版本 CVE 线索；另有 `--no-dns`、`--no-graphql`、`--allow-external`、`--out`。
+`--cve` 查版本 CVE 线索、`--proxy http://host:port` 指定出口（支持 socks5://）、`--proxy-from-system`
+强制走系统代理、`--direct` 禁止代理（含自动回退）、`--proxy-bypass "localhost,.corp"`；
+另有 `--no-dns`、`--no-graphql`、`--allow-external`、`--out`。
+
+**出口（egress）**：默认 `auto` —— 先直连，只有连接级失败（超时/重置/拒绝）才用系统代理重试**一次**，
+并把结果写进 `meta.egress`（mode/type/host/source/fallback_used）。代理若返回 502/503/504，
+视为「代理到不了目标」而非「目标应答」，绝不拿错误页当报告。
 
 只要求 Python 3.9+ 与两个必需依赖（`httpx`、`anyio`）。首次运行先安装：
 
@@ -182,7 +188,7 @@ runs/<domain>/
 
 ## 4. 验收标准
 
-完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。20 条验收项由测试断言。当前全仓 **150 tests OK**（`test_pipeline` 68 / `test_concurrency` 11 / `test_web` 16 / `test_intel` 19 / `test_triage` 11 / `test_doctor` 5 / `test_redaction` 20），`python -m unittest discover -s tests -t .` 可直接复现。
+完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。21 条验收项由测试断言。当前全仓 **166 tests OK**（`test_pipeline` 68 / `test_concurrency` 11 / `test_web` 16 / `test_intel` 19 / `test_triage` 11 / `test_doctor` 5 / `test_redaction` 20 / `test_egress` 16），`python -m unittest discover -s tests -t .` 可直接复现。
 
 ## 5. 已知限制
 

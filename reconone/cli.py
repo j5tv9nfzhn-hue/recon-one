@@ -10,7 +10,8 @@ import sys
 import time
 from urllib.parse import urlsplit
 
-from . import apiprobe, crawl as crawler, dns as dnsmod, hypotheses, jsanalyze, report as reportmod
+from . import apiprobe, crawl as crawler, dns as dnsmod, egress as egressmod, hypotheses
+from . import jsanalyze, report as reportmod
 from . import brief as briefmod
 from . import doctor as doctormod
 from . import intel as intelmod
@@ -118,7 +119,8 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
              allow_external: bool = False, verify_tls: bool = True, use_dns: bool = True,
              use_graphql: bool = True, quiet: bool = False,
              on_event=None, cancel=None, use_js: bool = True, use_intel: bool = True,
-             geo: bool = False, cve: bool = False, authorized_by: str = "") -> tuple[dict, int]:
+             geo: bool = False, cve: bool = False, authorized_by: str = "",
+             egress=None) -> tuple[dict, int]:
     """Run every probe once. `on_event` receives stage dicts; `cancel` is polled between stages.
 
     `use_js=False` skips bundle download + JS analysis entirely: endpoints then come from
@@ -141,6 +143,7 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
     session = Session(
         domain, timeout=limits["timeout"], max_total_bytes=limits["max_total_bytes"],
         allow_external=allow_external, verify_tls=verify_tls, budget_seconds=limits["budget_seconds"],
+        egress=egress,
     )
 
     # `cancel` may be a callable predicate (older callers) or a threading.Event (the web
@@ -178,7 +181,7 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
             raise ScanCancelled(stage)
 
     status: dict[str, str] = {}
-    emit("start", f"开始扫描 {domain}（profile={profile_name}）")
+    emit("start", f"开始扫描 {domain}（profile={profile_name}，出口={session.egress.label()}）")
     # Said once, at the top of every run, in the stream the console already shows: the
     # notice has to be visible to the person starting the scan, not only to whoever opens
     # the report afterwards. `--authorized-by` is what turns it from a warning into a record.
@@ -373,12 +376,28 @@ def cmd_scan(args) -> int:
     overrides = {"max_pages": args.max_pages, "max_depth": args.max_depth,
                  "max_js_bytes": args.max_js_bytes, "timeout": args.timeout,
                  "max_scripts": args.max_scripts}
+    # Egress: --proxy wins, then RECONONE_PROXY, then the system proxy. Without any of them
+    # the session stays direct and only falls back per-request when a connect attempt fails.
+    proxy_url = (getattr(args, "proxy", "") or os.environ.get("RECONONE_PROXY", "")).strip()
+    if proxy_url:
+        mode = "manual"
+    elif getattr(args, "direct", False):
+        mode = "direct"
+    elif getattr(args, "proxy_from_system", False):
+        mode = "system"
+    else:
+        mode = "auto"
+    try:
+        egress = egressmod.resolve(mode, proxy_url, getattr(args, "proxy_bypass", ""))
+    except ValueError as exc:
+        print(f"[egress] {exc}", file=sys.stderr)
+        return 2
     report, code = run_scan(domain, out_dir, args.profile, overrides,
                             allow_external=args.allow_external, verify_tls=not args.insecure,
                             use_dns=not args.no_dns, use_graphql=not args.no_graphql,
                             quiet=args.quiet, use_js=not args.no_js,
                             use_intel=not args.no_intel, geo=args.geo, cve=args.cve,
-                            authorized_by=getattr(args, "authorized_by", ""))
+                            authorized_by=getattr(args, "authorized_by", ""), egress=egress)
     if args.json:
         print(json.dumps({"exit_code": code, "counts": report["coverage"]["counts"],
                           "hypotheses": report["hypotheses"][:5]}, ensure_ascii=False))
@@ -462,6 +481,15 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--allow-external", action="store_true",
                       help="permit requests outside the target domain (off by default)")
     scan.add_argument("--insecure", action="store_true", help="skip TLS verification")
+    scan.add_argument("--proxy", default="", metavar="URL",
+                      help="route every request through this proxy: http:// or socks5://, "
+                           "optional user:pass@; RECONONE_PROXY is the env equivalent")
+    scan.add_argument("--proxy-from-system", action="store_true",
+                      help="force the system proxy (HTTPS_PROXY / ALL_PROXY / Windows WinINET)")
+    scan.add_argument("--direct", action="store_true",
+                      help="never use a proxy, including the automatic fallback")
+    scan.add_argument("--proxy-bypass", default="", metavar="SUFFIXES",
+                      help="comma separated suffixes that stay direct, e.g. localhost,.corp")
     scan.add_argument("--no-dns", action="store_true")
     scan.add_argument("--no-graphql", action="store_true", help="skip active introspection probe")
     scan.add_argument("--no-js", action="store_true",

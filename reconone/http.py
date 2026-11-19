@@ -1,13 +1,15 @@
 """Scope-guarded HTTP client with byte/time budgets, manual redirects and evidence logging."""
 from __future__ import annotations
 
+import errno
 import http.client
 import socket
 import ssl
 import time
 import zlib
-from urllib.parse import urlsplit, urlunsplit, urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
+from . import egress as egressmod
 from .config import DEFAULT_UA
 from .util import in_scope
 
@@ -89,7 +91,7 @@ class Session:
     def __init__(self, domain: str, timeout: float = 12.0, max_total_bytes: int = 40_000_000,
                  allow_external: bool = False, max_body: int = 4_000_000,
                  verify_tls: bool = True, user_agent: str = DEFAULT_UA,
-                 budget_seconds: float | None = None):
+                 budget_seconds: float | None = None, egress=None):
         self.domain = domain.lower()
         self.timeout = timeout
         self.max_total_bytes = max_total_bytes
@@ -111,6 +113,10 @@ class Session:
             self._ctx.check_hostname = False
             self._ctx.verify_mode = ssl.CERT_NONE
         self.off_scope_attempts: list[str] = []
+        # Egress is a property of the *run*, not of the target: `Egress()` means direct,
+        # which keeps every existing caller (and test) on today's behaviour.
+        self.egress = egress if egress is not None else egressmod.Egress()
+        self.fallback_count = 0
 
     # -- scope -----------------------------------------------------------------
     def in_scope(self, url: str) -> bool:
@@ -169,13 +175,71 @@ class Session:
             return resp
         return self._fail(url, "redirect_limit", f"more than {max_redirects} redirects")
 
-    def _once(self, url: str, method: str, data: bytes | None,
-              headers: dict | None, max_bytes: int | None) -> Response:
+    # -- transport -------------------------------------------------------------
+    @staticmethod
+    def _kind(exc: BaseException) -> str:
+        """Classify one transport failure; the kind drives both the report and the retry."""
+        if isinstance(exc, socket.gaierror):
+            return "dns"
+        if isinstance(exc, (socket.timeout, TimeoutError)):
+            return "connect-timeout"
+        if isinstance(exc, ssl.SSLError):
+            return "tls"
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return "reset"
+        if isinstance(exc, ConnectionRefusedError):
+            return "refused"
+        if isinstance(exc, http.client.HTTPException):
+            return "http"
+        code = getattr(exc, "errno", None)
+        if code == errno.ECONNREFUSED:
+            return "refused"
+        if code == errno.ECONNRESET:
+            return "reset"
+        if code == errno.ETIMEDOUT:
+            return "connect-timeout"
+        return "connect"
+
+    def _open(self, scheme: str, host: str, port: int, proxy, path_query: str):
+        """Return (connection, request_target, extra_headers) for one attempt.
+
+        Three routes, each with its own wire format:
+        * direct — origin-form request to the host;
+        * HTTP proxy — `CONNECT` tunnel for https, absolute-URI for http (RFC 7230 §5.3.2);
+        * SOCKS5 — CONNECT handshake, then TLS wraps the tunnel for https.
+        """
+        if proxy is None:
+            if scheme == "https":
+                return (http.client.HTTPSConnection(host, port, timeout=self.timeout,
+                                                    context=self._ctx), path_query, {})
+            return http.client.HTTPConnection(host, port, timeout=self.timeout), path_query, {}
+        if proxy.is_socks:
+            raw = egressmod.socks5_tunnel(proxy, host, port, self.timeout)
+            if scheme == "https":
+                sock = egressmod.tls_wrap(raw, host, self._ctx)
+                conn = http.client.HTTPSConnection(host, port, timeout=self.timeout,
+                                                   context=self._ctx)
+            else:
+                sock = raw
+                conn = http.client.HTTPConnection(host, port, timeout=self.timeout)
+            conn.sock = sock            # pre-connected: http.client must not dial again
+            return conn, path_query, {}
+        if scheme == "https":
+            conn = http.client.HTTPSConnection(proxy.host, proxy.port, timeout=self.timeout,
+                                               context=self._ctx)
+            conn.set_tunnel(host, port, headers=proxy.basic_header() or None)
+            return conn, path_query, {}
+        absolute = f"{scheme}://{host}" + ("" if port == 80 else f":{port}")
+        return (http.client.HTTPConnection(proxy.host, proxy.port, timeout=self.timeout),
+                absolute + path_query, proxy.basic_header())
+
+    def _attempt(self, url: str, method: str, data: bytes | None, headers: dict | None,
+                 max_bytes: int | None, proxy) -> Response:
         parts = urlsplit(url)
         scheme = (parts.scheme or "https").lower()
         host = parts.hostname or ""
         port = parts.port or (443 if scheme == "https" else 80)
-        target = urlunsplit(("", "", parts.path or "/", parts.query, ""))
+        path_query = urlunsplit(("", "", parts.path or "/", parts.query, ""))
         hdrs = {
             "User-Agent": self.user_agent,
             "Accept": "*/*",
@@ -188,12 +252,20 @@ class Session:
         started = time.time()
         conn = None
         try:
-            if scheme == "https":
-                conn = http.client.HTTPSConnection(host, port, timeout=self.timeout, context=self._ctx)
-            else:
-                conn = http.client.HTTPConnection(host, port, timeout=self.timeout)
+            conn, target, extra = self._open(scheme, host, port, proxy, path_query)
+            if extra:
+                hdrs.update(extra)
             conn.request(method, target, body=data, headers=hdrs)
             raw = conn.getresponse()
+            if proxy is not None and raw.status in (502, 503, 504):
+                # A proxy answering 5xx means the *proxy* could not reach the target. Treating
+                # that as a page would make "unreachable" look "scannable": the run would be
+                # scored against a proxy error page and every downstream stage would lie.
+                raw.read(2048)
+                self.requests += 1
+                self.log.append({"url": url, "status": raw.status, "bytes": 0, "ms": 0,
+                                 "method": method, "egress": "proxy", "error": "proxy-error"})
+                return self._fail(url, "proxy-error", f"proxy returned {raw.status}")
             cap = max_bytes or self.max_body
             body = raw.read(cap)
             truncated = len(body) >= cap
@@ -213,24 +285,13 @@ class Session:
             if self.bytes_total >= self.max_total_bytes:
                 self.exhausted = True
             self.log.append({"url": url, "status": raw.status, "bytes": len(body),
-                             "ms": elapsed, "method": method})
+                             "ms": elapsed, "method": method,
+                             "egress": "proxy" if proxy else "direct"})
             return Response(url, raw.status, resp_headers, body, elapsed, truncated=truncated,
                             header_list=header_list)
-        except ssl.SSLError as exc:
+        except Exception as exc:                      # noqa: BLE001 - classified, never lost
             self.requests += 1
-            return self._fail(url, "tls", str(exc))
-        except socket.timeout:
-            self.requests += 1
-            return self._fail(url, "timeout", f"no response within {self.timeout}s")
-        except socket.gaierror as exc:
-            self.requests += 1
-            return self._fail(url, "dns", str(exc))
-        except (ConnectionError, OSError) as exc:
-            self.requests += 1
-            return self._fail(url, "connect", str(exc))
-        except http.client.HTTPException as exc:
-            self.requests += 1
-            return self._fail(url, "http", repr(exc))
+            return self._fail(url, self._kind(exc), f"{type(exc).__name__}: {exc}")
         finally:
             if conn is not None:
                 try:
@@ -238,6 +299,45 @@ class Session:
                 except Exception:
                     pass
 
+    def _once(self, url: str, method: str, data: bytes | None,
+              headers: dict | None, max_bytes: int | None) -> Response:
+        """One request on the primary route, with at most one fallback retry.
+
+        The retry exists for exactly one failure shape: the direct path could not open a
+        connection (timeout / reset / refused) and a system proxy is available. It never
+        retries a TLS error or an HTTP status — those are answers from *something*, and
+        replaying them through another route would only produce a second wrong answer.
+        """
+        host = (urlsplit(url).hostname or "").lower()
+        primary = self.egress.route_for(host)
+        resp = self._attempt(url, method, data, headers, max_bytes, primary)
+        if resp.error is None:
+            return resp
+        kind = resp.error.split(":", 1)[0]
+        fallback = self.egress.fallback_for(host)
+        if fallback is None or kind not in ("connect-timeout", "reset", "refused"):
+            return resp
+        self.fallback_count += 1
+        self.log.append({"url": url, "status": 0, "bytes": 0, "ms": 0, "method": method,
+                         "egress": "fallback", "first_error": kind})
+        retry = self._attempt(url, method, data, headers, max_bytes, fallback)
+        if retry.error is not None:
+            # Both routes failed. Keep the direct failure as the answer and record that the
+            # fallback was tried; "two ways failed" must not read like "the target answered".
+            resp.error = f"{resp.error} · fallback: {retry.error.split(':', 1)[0]}"[:300]
+            return resp
+        return retry
+
+
+def egress_view(session) -> dict:
+    """What went out and how, for `meta.egress` (never includes proxy credentials)."""
+    egress = getattr(session, "egress", None)
+    if egress is None:                    # sessions built before egress existed
+        return {"mode": "direct", "type": "direct", "host": "", "source": "unknown",
+                "fallback": False, "fallback_used": 0, "fallback_requests_pct": 0.0,
+                "no_proxy": [], "pac": {"detected": False, "supported": False}}
+    return egress.view(fallback_count=getattr(session, "fallback_count", 0),
+                       requests=getattr(session, "requests", 0))
 
 def probe_tls_certificate(host: str, port: int = 443, timeout: float = 8.0, verify: bool = True) -> dict:
     """Separate handshake because http.client does not expose the peer certificate."""
