@@ -40,9 +40,16 @@ python -m reconone scan --domain example.com --authorized-by "CHG-2026-0417 / �
 | 2 | 响应头 | `Set-Cookie` 值、`Authorization` 等凭据值替换为 `[redacted:<sha12>:len=n]`，**名字与属性保留**（否则「有没有 HttpOnly」就无法判定） |
 | 3 | URL | 去掉 userinfo（`user:pass@`）、屏蔽敏感查询参数值，路径保留 |
 | 4 | 证据片段 | 头部原文块逐行脱敏后才进 `findings[].snippet` |
-| 5 | 整份报告 | 按**形状**兜底：`Bearer …`、JWT、`token=…`、凭据命名的键、任意 URL 字段 |
+| 5 | 整份报告 | 两道：①按**形状**兜底（`Bearer …`、JWT、`token=…`、凭据命名的键、任意 URL 字段）；②按**本次实际发出的凭据值**逐字遮蔽为 `[redacted:sent-credential]` |
 
 报告里同时写出 `meta.redaction`（层数、作用范围、例外），因此可以机读核对。
+
+第 5 层的第二道是「凭据不被目标回显」的兜底：形状扫描看不出「你好 `<你的 session id>`」是一个
+凭据，但工具自己知道自己发出过什么。`inject.Injection.secrets()` 提供这些值（长度 ≥6 才登记，
+否则遮蔽 `admin` 这类词会毁掉报告事实），`redact.mask_sent_credentials()` 在整份报告里逐字替换，
+目标把 Cookie/Bearer/自定义头回显到页面标题、正文或响应头里同样被遮掉。
+`meta.redaction.sent_credentials.registered` 记录登记了几个值、`masked` 表明已执行；
+`meta.session` 只写头名称与 Cookie 键名，**值本身不出现在 `report/` 的任何文件里**。
 
 **例外（有意为之）**：`raw/js/`、`raw/maps/` 保留原始字节，用于复核某条结论。它们
 ① 只在本地 `runs/` 下生成，② 被 `.gitignore` 排除，③ 在 `manifest.json` 里单独列出。

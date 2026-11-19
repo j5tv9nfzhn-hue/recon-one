@@ -23,6 +23,10 @@ from dataclasses import dataclass
 SECRET_HEADERS = ("authorization", "cookie", "x-api-key", "x-auth-token", "x-csrf-token",
                   "x-xsrf-token", "proxy-authorization")
 
+#: Values shorter than this are not registered for echo-masking: masking `1` or `admin`
+#: would destroy the report's facts without protecting anything.
+MIN_SECRET_LEN = 6
+
 
 @dataclass(frozen=True)
 class Injection:
@@ -57,19 +61,62 @@ class Injection:
             elif low == "authorization" and str(value).lower().startswith("bearer "):
                 bearer = True
         cookie_names = []
+        opaque = 0
         for chunk in cookie.split(";"):
-            key = chunk.split("=", 1)[0].strip()
-            if key:
+            key, sep, _value = chunk.partition("=")
+            key = key.strip()
+            if not key:
+                continue
+            if sep:
                 cookie_names.append(key)
+            else:
+                # `--cookie "SESSIONTOKEN"` has no name: recording the text would put the
+                # value in the report under a field that looks harmless. Count it instead.
+                opaque += 1
         return {
             "enabled": self.enabled,
             "source": self.source,
             "headers": names,
             "cookie_names": cookie_names,
+            "opaque_cookie_segments": opaque,
             "bearer": bearer,
             "secret_headers": sorted({n for n in names if n.lower() in SECRET_HEADERS}),
             "note": "只记录类型与名称，值永不写入报告。",
         }
+
+    def secrets(self) -> tuple[str, ...]:
+        """The literal values this scan sends, for echo-masking. Never serialised.
+
+        Values shorter than `MIN_SECRET_LEN` are left out on purpose: masking `1` or `admin`
+        would destroy the report's facts, and a five-character value is not a credential we
+        need to hide from ourselves. Longest first, because masking `abc123` before
+        `abc123def` would leave a visible tail behind.
+        """
+        found: set[str] = set()
+        for name, value in self.headers:
+            low = name.lower()
+            text = str(value)
+            if low == "cookie":
+                pairs = 0
+                for chunk in text.split(";"):
+                    _key, sep, val = chunk.partition("=")
+                    if not sep:
+                        continue
+                    pairs += 1
+                    val = val.strip()
+                    if len(val) >= MIN_SECRET_LEN:
+                        found.add(val)
+                if not pairs:
+                    text = text.strip()
+                    if len(text) >= MIN_SECRET_LEN:
+                        found.add(text)
+                continue
+            if low == "authorization" and text.lower().startswith("bearer "):
+                text = text[7:]
+            text = text.strip()
+            if len(text) >= MIN_SECRET_LEN:
+                found.add(text)
+        return tuple(sorted(found, key=lambda item: (-len(item), item)))
 
 
 def parse_header_specs(specs) -> list[tuple[str, str]]:

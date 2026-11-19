@@ -110,11 +110,11 @@ recon-one/
 | `tests/test_intel.py` | 19 | CT 只留目标域、CertSpotter 失败回退 crt.sh、失败折叠成 `status`、存档路径与敏感路径、geo/CVE 默认关闭、站点类型规则、**重试吞掉一次 502**、**子域落地成 `probed:false` 资产**、digest 排除运行遥测 |
 | `tests/test_triage.py` | 11 | 权重恒定、指数与带、覆盖率不足拒绝出结论、WAF/版本抬难度、端点面抬价值、`unknown≠fail`、同输入同输出、**主动项接线与权重占比** |
 | `tests/test_doctor.py` | 5 | 五项行为检查全过、版本可读、坏检查被报告而不抛出、CLI 退出码 0/4 |
-| `tests/test_redaction.py` | 20 | 四层定点脱敏（头/URL/证据/密钥）+ **第五层整份报告形状扫描**：`hosts[].url`、`intel.archive` 行、`well_known` 正文里的凭据都不出现，计数/路径/Cookie 属性保留，清洗幂等，`meta.redaction` 例外可机读 |
+| `tests/test_redaction.py` | 28 | 四层定点脱敏（头/URL/证据/密钥）+ **第五层两道扫描**：形状（`hosts[].url`、`intel.archive` 行、`well_known` 正文）与**本次发出凭据的值级遮蔽**（页面标题/正文/`X-Echo-*` 头回显都遮掉，最长值优先，短值不登记，幂等）；`meta.redaction` 可机读 |
 | `tests/test_egress.py` | 16 | E1 代理全量转发（目标零直连、绝对 URI、CONNECT）、E2 系统代理发现/auto 回退/direct/bypass/PAC 标注、E3 SOCKS5 隧道、E4 失败分类 + 只对连接级失败回退一次 + 代理 5xx 记 proxy-error + 凭据不进报告 |
 | `tests/test_verify.py` | 10 | 轻量验证：可用/不可用判定、破坏性路径跳过、预算上限、越界请求被作用域守卫拦下并记录、禁用时零请求、只发 GET、RoE 序列化、TLS 证书探测走 CONNECT |
-| `tests/test_session.py` | 31 | 会话注入到达服务端（含重定向）、注入头大小写无关覆盖、`describe()` 不含凭据值、`RECONONE_*`、`--header` 语法校验、逐 host 独立限速、`Retry-After` 与指数退避封顶、成功重置、等待上限与预算收缩、真实 429 退避、整包产物零凭据 |
-| **合计** | **209** | `python -m unittest discover -s tests -t .` 全绿（约 60s） |
+| `tests/test_session.py` | 34 | 会话注入到达服务端（含重定向）、注入头大小写无关覆盖、`describe()` 不含凭据值且裸 Cookie 只计数、`secrets()` 只登记 ≥6 字符值并按长度降序、`RECONONE_*`、`--header` 语法校验、逐 host 独立限速、`Retry-After` 与指数退避封顶、成功重置、等待上限与预算收缩、真实 429 退避、整包产物零凭据 |
+| **合计** | **220** | `python -m unittest discover -s tests -t .` 全绿（约 80s） |
 
 新增的关键回归：
 
@@ -184,3 +184,19 @@ brief 增加一行摘要；`digest` 排除这两块——「带了谁、跑多�
 断言 body 里的 `cookie/bearer/headers/rate` 进入报告（`meta.session.source == "web"`），
 且**进度事件流非空**。最后一条是为了钉住本轮修掉的回归：`_run_batch` 曾把
 `on_event`/`cancel` 一起丢掉，扫描照样出报告，只是控制台再也没有阶段消息、也无法取消。
+
+### 6.1 凭据不进报告：从「我们不写」到「目标也写不进去」
+
+第一版只保证自己不落盘：`describe()` 输出头名/Cookie 键名/是否 Bearer。审查时补上两处真实缺口：
+
+1. **`--cookie "SESSIONTOKEN"` 这种无键名写法**，旧 `describe()` 会把整段文本当成「Cookie 键名」
+   写进 `meta.session` —— 名字看起来无害，内容就是凭据。现在只统计 `opaque_cookie_segments`。
+2. **目标回显**：形状扫描看不出「你好 `<你的 sid>`」是凭据。现在第五层脱敏加一道**按值**替换：
+   `Injection.secrets()`（长度 ≥6、最长优先）交给 `redact.mask_sent_credentials()`，在整份报告里
+   逐字替换为 `[redacted:sent-credential]`；命中计数不进报告（会让 digest 取决于服务端行为），
+   只记 `meta.redaction.sent_credentials.registered`。
+
+测试用**故意回显** Cookie/Bearer/ApiKey 的靶站跑完整扫描（`TestEchoedCredentialsNeverReachTheReport`）：
+先断言服务端确实收到了这三个值（否则「没泄露」可能只是「什么都没发」），再断言整包
+`.json/.md/.txt/.html` 里一个值都搜不到、`report.json` 里留有遮蔽标记、markdown 写明「报告侧脱敏」。
+`REDACTION_VERSION` 因此从 `1` 升到 `2`。

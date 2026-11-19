@@ -410,10 +410,13 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
     # reader can verify the whole package with one hash.
     report["intel"] = intel or {}
     report["verification"] = verification or {}
-    # Fifth redaction layer: a shape-based sweep over the *whole* report, so fields added
-    # later (JS-derived host URLs, third-party archive rows, well-known bodies) are covered
-    # by default. Runs before the profile/digest so every derived artefact sees masked text.
-    report = redactmod.scrub_report(report)
+    # Fifth redaction layer, two passes over the *whole* report, so fields added later
+    # (JS-derived host URLs, third-party archive rows, well-known bodies) are covered by
+    # default: (a) by shape, and (b) by the literal values this scan actually sent — a target
+    # that echoes our Cookie into a page title is exactly the case shapes cannot see.
+    # Runs before the profile/digest so every derived artefact sees masked text.
+    sent = (session.injection.secrets() if getattr(session, "injection", None) else ())
+    report = redactmod.scrub_report(report, secrets=sent)
     report["profile"] = triagemod.build(report, report["intel"])
     report["meta"]["deterministic_digest"] = sha256_text(
         canonical_json(_digest_view(report)))[:16]
@@ -625,6 +628,14 @@ def _session_markdown(report: dict) -> list[str]:
             lines.append(f"- Cookie 名称：{', '.join(cookie_names)}（值不写入）")
         if sess.get("bearer"):
             lines.append("- 携带 Authorization: Bearer（令牌不写入）")
+        registered = int(((meta.get("redaction") or {}).get("sent_credentials") or {})
+                         .get("registered", 0))
+        if registered:
+            lines.append(f"- 报告侧脱敏：本次发出的 {registered} 个凭据值已按**字面量**全报告遮蔽"
+                         f"（目标把它回显到页面/响应头里同样遮掉）；`raw/` 保留原文，见 SECURITY.md")
+        opaque = int(sess.get("opaque_cookie_segments") or 0)
+        if opaque:
+            lines.append(f"- 无键 Cookie 片段 {opaque} 个：只记数量，文本不入报告")
         lines.append("- 429/401/403 因此可按“已认证身份”解读；越权与横向仍不在本工具范围")
     else:
         lines.append("- 未注入凭据：401/403 只能标红，“需要授权”与“不存在”不可区分")

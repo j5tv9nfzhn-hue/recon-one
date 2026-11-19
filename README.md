@@ -36,7 +36,7 @@ cd recon-one
 python -m reconone doctor                     # 先确认 httpx/anyio/ssl/dns 真的能用（1 秒，不联网）
 python -m reconone ui                         # 启动 Web 控制台（前后端同一进程）
 python -m reconone scan --domain example.com --profile default   # 纯命令行
-python -m unittest discover -s tests -t .     # 209 项测试（全部本地、不联网）
+python -m unittest discover -s tests -t .     # 220 项测试（全部本地、不联网）
 ```
 
 常用开关（`scan`）：`--no-js` 不下载前端 bundle、`--no-intel` 关闭被动情报、`--geo` 查 IP 地理位置、
@@ -54,6 +54,11 @@ python -m unittest discover -s tests -t .     # 209 项测试（全部本地、�
 `RECONONE_HEADERS`，换行分隔）会被加到**每一个**请求上，重定向后依然带上。凭据只以「形状」进报告：
 `meta.session` 记录头名称、Cookie 键名、是否携带 Bearer，**值永不写入任何产物**（进程参数可见，
 真 token 建议走环境变量）。注入了身份之后，401/403 才能按「已认证身份」解读。
+
+**回显也算泄露**：目标可能把我们的 Cookie 印在页面标题或响应头里。形状扫描看不出「你好 `<你的 sid>`」
+是凭据，所以第五层脱敏另有一道**按值**的遮蔽——本次实际发出的凭据值（长度 ≥6）在整份报告里被替换为
+`[redacted:sent-credential]`，`meta.redaction.sent_credentials` 记录登记了几个值。`raw/` 保留原文用于
+复核，交付时只给 `report/`（见 [SECURITY.md](SECURITY.md)）。
 
 **速率与退避**：`--rate N` 按 **host 独立**计算间隔（A 站慢不拖累 B 站）；收到 429/503 时优先遵守
 `Retry-After`，否则指数退避 0.5s→1→2→4→8s 封顶，只推后**该 host 的下一次**请求。单次等待有上限
@@ -203,12 +208,14 @@ runs/<domain>/
 
 ## 4. 验收标准
 
-完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。23 条验收项由测试断言。当前全仓 **209 tests OK**（`test_pipeline` 69 / `test_concurrency` 11 / `test_web` 17 / `test_intel` 19 / `test_triage` 11 / `test_doctor` 5 / `test_redaction` 20 / `test_egress` 16 / `test_verify` 10 / `test_session` 31），`python -m unittest discover -s tests -t .` 可直接复现。
+完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。23 条验收项由测试断言。当前全仓 **220 tests OK**（`test_pipeline` 69 / `test_concurrency` 11 / `test_web` 17 / `test_intel` 19 / `test_triage` 11 / `test_doctor` 5 / `test_redaction` 28 / `test_egress` 16 / `test_verify` 10 / `test_session` 34），`python -m unittest discover -s tests -t .` 可直接复现。
 
 ## 5. 已知限制
 
 - **单身份视角**：默认匿名；`--cookie/--bearer/--header` 可携带一个已授权身份，但不跟踪 `Set-Cookie`、
   不做多账号对比、不自动登录，因此「越权/横向」类结论不在本工具范围。
+- **`report/` 不含凭据，`raw/` 例外**：`report.*` 里连回显的凭据都被遮掉，但 `raw/js`、`raw/maps`
+  保留原始字节用于复核（见 [SECURITY.md](SECURITY.md)）；交付时只给 `report/`，或先删 `raw/`。
 - **无渲染引擎**：不执行 JS，纯静态分析。SPA 的动态接口只能通过 bundle 字面量与 source map 获得。
 - **技术指纹**为规则匹配，会误报（例如同源 CDN 头）。
 - **GraphQL introspection** 属主动探测，可用 `--no-graphql` 关闭。

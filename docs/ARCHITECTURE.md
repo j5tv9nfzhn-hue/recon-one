@@ -57,7 +57,7 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 | 模块 | 行数 | 扇入 | 职责 |
 |---|---:|---:|---|
 | `util.py` | 334 | 8 | 哈希、密钥脱敏、**响应头/URL/证据片段脱敏**、URL 归一化、确定性 JSON、JS 美化、端点归一 |
-| `redact.py` | 111 | 1 | 第五层兜底脱敏：按形状扫描整份报告（Bearer/JWT/`token=`/凭据键名/任意 URL），并输出可机读的 `meta.redaction` |
+| `redact.py` | 181 | 1 | 第五层兜底脱敏：按**形状**（Bearer/JWT/`token=`/凭据键名/任意 URL）与**本次发出的凭据值**（`[redacted:sent-credential]`，覆盖目标回显）扫描整份报告，并输出可机读的 `meta.redaction` |
 | `egress.py` | 322 | 2 | 出口策略：`--proxy`/系统代理（env + WinINET）/`--direct`/bypass、SOCKS5 握手（自实现，无额外依赖）、`meta.egress` |
 | `config.py` | 199 | 8 | 版本号、**授权声明常量**、三档扫描预算、输出根解析、规则加载（带缓存） |
 | `http.py` | 403 | 3 | 作用域守卫的 HTTP 客户端：代理四路由（直连/CONNECT/绝对 URI/SOCKS5）、TLS 证书探测同路由、**注入头合并 + 逐 host 限速/退避**、失败分类、回退重试、预算与解压上限 |
@@ -70,11 +70,11 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 | `intel.py` | 381 | 1 | 被动情报：唯一对外网络出口（可注入），CT 子域 / Wayback 存档 / geo / CVE 逐项 status；单次重试 + 分 provider 超时，永不抛 |
 | `triage.py` | 393 | 1 | 目标画像：10 项价值 + 9 项难度规则表（含两项主动实测）、覆盖率门槛、机会指数（非概率）、passive/active 与权重占比 |
 | `verify.py` | 184 | 2 | 轻量验证：每端点一次 GET（RoE 限定方法/上限/排除词），与作用域守卫双检；产出 usable/unusable/skipped + 逐条 audit |
-| `inject.py` | 130 | 2 | 会话注入：`--cookie/--bearer/--header` 与 `RECONONE_*` 合成不可变头表；`describe()` 只暴露头名与 Cookie 键名，值永不进报告 |
+| `inject.py` | 177 | 2 | 会话注入：`--cookie/--bearer/--header` 与 `RECONONE_*` 合成不可变头表；`describe()` 只暴露头名与 Cookie 键名（无键片段只计数），`secrets()` 仅供脱敏层按值遮蔽，值永不进报告 |
 | `rate.py` | 120 | 2 | 逐 host 限速与退避：`1/rate` 间隔、429/503 → `Retry-After` 或指数退避（0.5→8s 封顶）、单次等待上限、`stats()` 记账 |
 | `hypotheses.py` | 165 | 1 | 决策层：把事实转成带前置条件、验证步骤、成本与增益的假设 |
 | `score.py` | 782 | 2 | 证据门控评分：18 个原子检查、两轴、覆盖率门槛、triage 规则树 |
-| `report.py` | 895 | 1 | 报告组装、画像注入、子域资产、主动遥测、`meta.egress`/`meta.roe`/`meta.session`/`meta.rate`、验证块、会话与速率摘要、授权块与五层脱敏、Schema 校验、markdown/handoff 渲染 |
+| `report.py` | 907 | 1 | 报告组装、画像注入、子域资产、主动遥测、`meta.egress`/`meta.roe`/`meta.session`/`meta.rate`、验证块、会话与速率摘要、授权块与五层脱敏（含发出凭据的值级遮蔽）、Schema 校验、markdown/handoff 渲染 |
 | `brief.py` | 404 | 1 | AI 简报：授权行 + 画像摘要 + 验证结论 + 会话/速率行 + 按决策价值排序、硬字符预算 |
 | `doctor.py` | 148 | 2 | 依赖自检：行为级验证 httpx 客户端、anyio TaskGroup+限流器、DNS 套接字、TLS 校验；不联网 |
 | `cli.py` | 593 | 2 | 参数解析（`--authorized-by` / `--proxy` 系列 / `--no-verify` / `--cookie` / `--bearer` / `--header` / `--rate` / `--max-backoff`）、出口解析、会话装配、验证阶段、阶段编排、`doctor`、退出码 |
@@ -190,13 +190,17 @@ max_js_bytes / max_total_bytes / timeout / budget_seconds` 写死，并回显在
 4. **证据片段**：`report._scrub_findings()` 处理 `evidence[].snippet` 里的原始响应头块，
    `_scrub_hypothesis()` 处理假设文本。这两处是真实漏点——`derive_findings()` 会把整块响应头
   存成证据，`authorization:` 与 `set-cookie:` 原文曾从这里绕过前三层。
-5. **整份报告的兜底扫描**：`redact.scrub_report()` 在 `assemble()` 把报告交出去之前按**形状**
-   再走一遍——`Bearer …` / `Basic …`、JWT、任意 `…token=…` 行内键值、凭据命名的键
+5. **整份报告的兜底扫描**：`redact.scrub_report()` 在 `assemble()` 把报告交出去之前走**两遍**。
+   第一遍按**形状**——`Bearer …` / `Basic …`、JWT、任意 `…token=…` 行内键值、凭据命名的键
    （`password`/`token`/`secret`…，按**精确键名**匹配，因此 `auth_surface` 这类检查项 id
    不会被误杀）、以及所有带 `://` 的字符串。加这一层的理由很直接：`assets.hosts[].url`
    （来自 JS 字面量）、`report.intel`（Wayback 行里可能带 token）、`assets.well_known` 正文
    都不在前四层的覆盖面上，而**以后新加的字段同样不会自动被前四层覆盖**。
-   代价只有一次确定性遍历；收益是"新字段默认安全"。
+   第二遍按**值**——`session.injection.secrets()` 给出本次实际发出的凭据值（长度 ≥6，最长优先），
+   在整份报告里逐字替换为 `[redacted:sent-credential]`。形状扫描看不出「你好 `<你的 session id>`」
+   是一个凭据，但工具知道自己发过什么：目标把 Cookie/Bearer/自定义头回显到页面标题、正文或响应头，
+   都落在这一遍里。`describe()` 只输出名称，`secrets()` 只用于遮蔽，两者都不写出任何值。
+   代价只有一次确定性遍历；收益是"新字段默认安全 + 回显默认安全"。
 
 密钥原文只落在 `raw/js/`；`report.json` 全文不含密钥、会话 Cookie 值、URL 凭据。
 每份报告的 `meta.redaction` 记录层数、作用范围与例外（`raw/` 保留原始字节用于复核，
@@ -262,8 +266,15 @@ RoE（`verify.RoE`）是这一阶段的机器可读契约：作用域、允许�
 
 凭据是唯一「必须发出、且绝不落盘」的数据，因此 `describe()` 是它进报告的唯一通道：只输出
 **头名称、Cookie 键名、是否携带 Bearer**（`meta.session`）。`Authorization: Bearer eyJ…` 出现在
-报告里就是一次泄漏；`{"bearer": true}` 才是证据。`tests/test_session.py` 会遍历整包产物，
-断言测试用的三个假凭据不出现在任何 `.json/.md/.txt` 里。
+报告里就是一次泄漏；`{"bearer": true}` 才是证据。没有键名的裸 Cookie 片段
+（`--cookie "SESSIONTOKEN"`）只记数量 `opaque_cookie_segments`，文本本身不入报告。
+
+**回显是另一半**：`describe()` 管住「我们不写」，`secrets()` + `redact.mask_sent_credentials()` 管住
+「目标替我们写」。后者把本次发出的值（≥6 字符、最长优先）在整份报告里逐字替换成
+`[redacted:sent-credential]`——页面标题、`well_known` 正文、响应的 `X-Echo-*` 头都覆盖。
+`tests/test_redaction.py::TestEchoedCredentialsNeverReachTheReport` 用一个**故意回显**
+Cookie/Bearer/ApiKey 的靶站跑完整扫描，先断言服务端确实收到了（否则测试会在「什么都没发」时假通过），
+再断言整包 `.json/.md/.txt/.html` 里没有任何一个值。
 
 `rate.py` 解决两个不同问题，共用一份状态：
 

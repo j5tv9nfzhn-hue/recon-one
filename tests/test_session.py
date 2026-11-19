@@ -176,6 +176,26 @@ class TestDescribeHoldsNoValues(unittest.TestCase):
         self.assertEqual(data["headers"], [])
         self.assertEqual(data["cookie_names"], [])
 
+    def test_bare_cookie_value_is_counted_not_named(self):
+        """`--cookie "SESSIONTOKEN"` has no name; recording the text would be a leak."""
+        data = injectmod.build(cookie="SESSIONTOKENVALUE").describe()
+        self.assertEqual(data["cookie_names"], [])
+        self.assertEqual(data["opaque_cookie_segments"], 1)
+        self.assertNotIn("SESSIONTOKENVALUE", json.dumps(data, ensure_ascii=False))
+
+    def test_secrets_lists_what_we_send_and_skips_short_values(self):
+        inj = injectmod.build("sid=S3CRETCOOKIE; role=admin", "S3CRETBEARER",
+                              ["X-Api-Key: S3CRETAPIKEY", "X-Tenant: acme"])
+        self.assertEqual(set(inj.secrets()),
+                         {"S3CRETCOOKIE", "S3CRETBEARER", "S3CRETAPIKEY"},
+                         "只登记长度 ≥6 的值；admin/acme 这类短值遮蔽会毁掉报告事实")
+        self.assertEqual(injectmod.Injection().secrets(), ())
+
+    def test_secrets_are_ordered_longest_first(self):
+        inj = injectmod.build("a=S3CRETCOOKIE123456; b=S3CRETCOOKIE")
+        # 短值先遮蔽会在长值里留下可见尾巴，所以长的必须排在前面。
+        self.assertEqual(inj.secrets(), ("S3CRETCOOKIE123456", "S3CRETCOOKIE"))
+
     def test_build_returns_empty_injection_when_nothing_is_given(self):
         inj = injectmod.build("", "", [])
         self.assertFalse(inj.enabled)

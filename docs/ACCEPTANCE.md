@@ -6,9 +6,9 @@
 python -m unittest discover -s tests -t .
 ```
 
-当前结果：**209 tests OK**（`test_pipeline.py` 69 / `test_concurrency.py` 11 / `test_web.py` 17 /
-`test_intel.py` 19 / `test_triage.py` 11 / `test_doctor.py` 5 / `test_redaction.py` 20 /
-`test_egress.py` 16 / `test_verify.py` 10 / `test_session.py` 31），全部走本地靶站或纯函数，不访问公网。
+当前结果：**220 tests OK**（`test_pipeline.py` 69 / `test_concurrency.py` 11 / `test_web.py` 17 /
+`test_intel.py` 19 / `test_triage.py` 11 / `test_doctor.py` 5 / `test_redaction.py` 28 /
+`test_egress.py` 16 / `test_verify.py` 10 / `test_session.py` 34），全部走本地靶站或纯函数，不访问公网。
 
 ## 验收矩阵
 
@@ -33,10 +33,10 @@ python -m unittest discover -s tests -t .
 | AC17 | `--no-js` 仍产出端点面：不下载、不落盘 bundle，端点来自 `html-link / html-form / robots / sitemap / wayback` 且带 `sources`，JS 派生检查为 `unknown` | `TestNoJsMode::test_js_stage_is_skipped_and_no_bundle_is_saved` / `test_endpoints_come_from_non_js_sources` / `test_profile_is_attached_and_says_what_is_unknown` |
 | AC18 | 依赖自检回答「这台机器能不能跑」，而不是「库能不能 import」：5 项行为检查、失败保留异常文本、CLI 健康返回 0 / 坏掉返回 4 | `test_every_check_passes_in_this_environment` / `test_a_broken_check_is_reported_and_not_raised` / `test_cli_exits_zero_when_healthy_and_four_when_broken` |
 | AC19 | 横向对比接口需登录，每行给出 `worth / ease(100-hardness) / index / counts`（按当前模型重算评分）；子域作为 `probed:false` 资产落地 | `test_web.py::TestServer::test_compare_lists_every_run_with_three_decision_axes` / `test_intel.py::TestSubdomainsBecomeAssets` |
-| AC20 | 第五层兜底脱敏：`assets.hosts[].url`、`report.intel` 的 Wayback 行、`assets.well_known` 正文里的凭据形状都被抹掉，而计数/路径/Cookie 属性原样保留；重复清洗结果不变 | `test_redaction.py::TestWholeReportSweep::test_fields_that_used_to_leak_are_covered` / `test_strict_keys_are_masked_and_already_masked_values_are_left_alone` |
+| AC20 | 第五层兜底脱敏：`assets.hosts[].url`、`report.intel` 的 Wayback 行、`assets.well_known` 正文里的凭据形状都被抹掉，而计数/路径/Cookie 属性原样保留；重复清洗结果不变；**本次实际发出的凭据值按字面量遮蔽**（含目标把 Cookie/Bearer/ApiKey 回显到页面标题、正文、`X-Echo-*` 响应头的情形），`meta.redaction.sent_credentials.registered` 可机读 | `test_redaction.py::TestWholeReportSweep` / `TestSentCredentialsAreMaskedByValue` / `TestEchoedCredentialsNeverReachTheReport` |
 | AC21 | 出口（E1–E4）：`--proxy` 后所有请求经代理、目标零直连；系统代理从 env/WinINET 发现且 PAC 显式标注不支持；SOCKS5 可用；失败分类为 `connect-timeout/reset/refused/tls`，只有连接级失败回退一次，代理 5xx 记为 `proxy-error` 而不当页面 | `test_egress.py::TestProxyEgress` / `TestSystemProxy` / `TestSocks5` / `TestFailureClassification` |
 | AC22 | 轻量验证：每端点一次 GET，可用（2xx/3xx/401/403/405/429）标红、404/410 与连接失败标灰；RoE 限定方法与上限、破坏性路径不发送、越界请求被作用域守卫拦下且记录；`meta.roe` + `verification.summary` 可追溯；TLS 证书探测与请求走同一出口 | `test_verify.py`（10 项）/ `test_pipeline.py::FixtureScan::test_verification_stage_is_bound_and_recorded` |
-| AC23 | 会话注入与限速：Cookie/Bearer/自定义头到达服务端且重定向后仍携带；`meta.session` 只含头名与 Cookie 键名，测试凭据不出现在任何产物文件；`--rate N` 按 host 独立限速（`wait_ms` 逐请求记账），429/503 按 `Retry-After` 或指数退避（0.5→8s 封顶）推后该 host 的下一次请求，成功即重置；单次等待有上限且受预算约束 | `test_session.py`（31 项） |
+| AC23 | 会话注入与限速：Cookie/Bearer/自定义头到达服务端且重定向后仍携带；`meta.session` 只含头名与 Cookie 键名（**无键名的裸 Cookie 片段只计数**），`describe()`/`secrets()` 都不写出值，整包产物里搜不到任何凭据；`--rate N` 按 host 独立限速（`wait_ms` 逐请求记账），429/503 按 `Retry-After` 或指数退避（0.5→8s 封顶）推后该 host 的下一次请求，成功即重置；单次等待有上限且受预算约束 | `test_session.py`（34 项）/ `test_web.py::TestConsoleSessionPassThrough` |
 
 > AC13 的「必备小节」由测试断言为 3 个（已确认事实 / 未覆盖项 / 建议动作）；`handoff.md` 实际含 5 节，
 > 停机条件在第 4 节。文档与断言以**测试**为准。
@@ -63,6 +63,11 @@ Wayback 路径与敏感路径识别、geo/CVE 默认关闭与显式开启、站�
 `describe()` 不含任何凭据值、`RECONONE_*` 环境变量读取、`--header` 语法错误、逐 host 独立限速、
 `Retry-After` 与指数退避封顶、成功重置、单次等待上限与预算收缩、真实靶站上的 429 退避、以及
 「整包产物不含凭据」的目录级断言。
+`test_redaction.py` 另覆盖**按值遮蔽**：本次发出的凭据被回显进页面标题、`well_known` 正文、
+`X-Echo-*` 响应头时都会被替换成 `[redacted:sent-credential]`（最长值优先，避免留下可见尾巴），
+短值（`admin`/`acme`）不登记以免毁掉报告事实，重复清洗结果不变；端到端用例跑一个**故意回显**
+Cookie/Bearer/ApiKey 的靶站，先证明服务端确实收到了（否则会假通过），再断言整包
+`.json/.md/.txt/.html` 里搜不到任何一个值。
 
 ## 端到端冒烟（非自动，人工执行）
 
