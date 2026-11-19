@@ -36,7 +36,7 @@ cd recon-one
 python -m reconone doctor                     # 先确认 httpx/anyio/ssl/dns 真的能用（1 秒，不联网）
 python -m reconone ui                         # 启动 Web 控制台（前后端同一进程）
 python -m reconone scan --domain example.com --profile default   # 纯命令行
-python -m unittest discover -s tests -t .     # 244 项测试（全部本地、不联网）
+python -m unittest discover -s tests -t .     # 261 项测试（全部本地、不联网）
 ```
 
 常用开关（`scan`）：`--no-js` 不下载前端 bundle、`--no-intel` 关闭被动情报、`--geo` 查 IP 地理位置、
@@ -144,7 +144,7 @@ python -m reconone ui --host 0.0.0.0                       # 仅在你确知网�
 | **非 JS 端点来源** | 链接、表单 action、robots、sitemap、Wayback 路径，与 JS 结果按路径合并并标 `sources` | `endpoints[source=html-link\|html-form\|robots\|sitemap\|wayback]` |
 | **被动情报** | CT 日志子域（CertSpotter 主 / crt.sh 回退）、Wayback 快照与历史敏感路径、可选 geo 与版本 CVE 线索 | `intel.ct / intel.archive / intel.geo / intel.cve` |
 | **目标画像** | 10 项价值 + 9 项难度规则表 → 价值/难度/机会指数（非概率），逐项标 `passive` / `active`，并给出主动权重占比 | `profile`、`profile.weights` |
-| **轻量验证** | 每个端点一次 `GET`（RoE：方法/上限/排除词 + 作用域守卫双检），可用标红、不可用标灰；被拦下的不发送但留 audit | `verification`、`endpoints[].verified`、`meta.roe` |
+| **轻量验证** | 单身份 `HEAD` 判存在（405/501 补一次 GET），双身份两次 `GET` 做**授权差分**（anon 2xx + 内容差异 = 匿名开放）；RoE 方法/上限 + 作用域守卫双检，破坏性动词按词边界跳过 | `verification`、`verification.summary.authz`、`endpoints[].authz_open`、`meta.roe` |
 | **TLS 证书** | 与请求走同一出口（直连 / CONNECT / SOCKS5），不再有隐藏直连 | `assets.tls.egress`、`assets.tls` |
 | **主动探测评分** | 只统计本次已经发出的请求：可达端点（`worth.live_surface`）、被拦截比例与 429 次数（`hard.active_blocking`）；不新增任何爆破/模糊测试 | `meta.probe_stats`、`profile.checks` |
 | **会话与限速** | 凭据按形状记录（头名/Cookie 键名/是否 Bearer，值不入盘）、每 host 独立限速、429/503 按 `Retry-After` 或指数退避 | `meta.session`、`meta.rate` |
@@ -170,6 +170,23 @@ python -m reconone ui --host 0.0.0.0                       # 仅在你确知网�
 子域泛滥），两项各自带覆盖率；覆盖率 < 60% 时**不给机会指数**。机会指数 = `0.55×价值 + 0.45×(100−难度)`，
 输出 `index / band / range` 且 `is_probability=false` —— 它是可解释的机会排序，不是漏洞概率。
 `rate_limit` 与 `mfa` 静态不可观测，永远是 `unknown`。详见 [docs/INTEL.md](docs/INTEL.md)。
+
+### 1.3 下注判决：worth / not_worth / withheld
+
+画像解决"好不好打"，**判决**解决"要不要下注"。报告顶层有 `bet` 块（阈值 A）：
+
+- 判据一 `anonymous_parameterized`：**带参数**的端点**无需凭据**即可访问。没有注入身份时，本次扫描本身
+  就是匿名的，命中即算；注入了 `--cookie/--bearer` 时，用**两次 GET**（认证 / 匿名）比对，只有匿名侧
+  2xx/3xx 才算命中，并用响应长度与标题差异给出内容证据。
+- 判据二 `live_subdomain_nonpublic`：存活子域暴露非公开面（子域探测落地后生效，当前记 `unknown`）。
+
+三态判决是重点：`withheld` 表示证据不足以下注（例如关掉了验证、或子域没探），**不等于不值得**。
+把它读成 `not_worth` 会系统性低估目标，所以报告里永远同时给出判据、计数、`kill_criteria`（什么会让我
+改判）与 `unknowns`。
+
+顺带说明验证引擎的取法：单身份用 `HEAD` 判存在（比 GET 便宜、无响应体），服务器拒绝 `HEAD`（405/501）
+时补一次 `GET`；双身份用两次 `GET` 做授权差分。破坏性动词（`close/void/refund/apply…`）按**词边界**
+跳过，`/applications` 不会被 `apply` 误杀。
 
 ## 2. 报告格式与交付方式
 
@@ -218,12 +235,13 @@ runs/<domain>/
 
 ## 4. 验收标准
 
-完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。25 条验收项由测试断言。当前全仓 **244 tests OK**（`test_pipeline` 70 / `test_concurrency` 11 / `test_web` 17 / `test_intel` 19 / `test_triage` 11 / `test_doctor` 5 / `test_redaction` 28 / `test_egress` 16 / `test_verify` 10 / `test_session` 34 / `test_cookies` 23），`python -m unittest discover -s tests -t .` 可直接复现。
+完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。26 条验收项由测试断言。当前全仓 **261 tests OK**（`test_pipeline` 72 / `test_concurrency` 11 / `test_web` 17 / `test_intel` 19 / `test_triage` 19 / `test_doctor` 5 / `test_redaction` 28 / `test_egress` 16 / `test_verify` 17 / `test_session` 34 / `test_cookies` 23），`python -m unittest discover -s tests -t .` 可直接复现。
 
 ## 5. 已知限制
 
-- **单身份视角**：默认匿名；`--cookie/--bearer/--header` 可携带一个已授权身份，Set-Cookie 会自动
-  续用同一个会话，但不做多账号对比、不自动登录、不猜口令，因此「越权/横向」类结论不在本工具范围。
+- **单身份/双身份**：默认匿名扫描（此时"匿名可访问"是事实）；`--cookie/--bearer/--header` 注入身份后，
+  验证阶段自动切到**双身份**（另开一个无凭据 session 做对比）。两种模式下"匿名可访问"的判定口径不同，
+  报告用 `verification.summary.identity_model` 明示，`bet.identity` 复述一遍，不让人猜。
 - **cookie 规则是子集**：不实现 `SameSite`（我们不是跨站上下文）、不做 public suffix 推断，
   所以 `Domain` 只接受目标本身或它的子域，宁可拒收也不当 confused deputy。
 - **`report/` 不含凭据，`raw/` 例外**：`report.*` 里连回显的凭据都被遮掉，但 `raw/js`、`raw/maps`

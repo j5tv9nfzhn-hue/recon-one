@@ -391,3 +391,125 @@ def headers_value(assets: dict, name: str) -> str:
 
 def headers_lower(assets: dict) -> set[str]:
     return {str(k).lower() for k in ((assets.get("http") or {}).get("headers") or {})}
+
+
+#: The bet threshold this build implements. Named so a future threshold cannot silently
+#: change what an old report meant.
+BET_THRESHOLD = "A"
+
+BET_DEFINITION = ("A：至少 1 个**匿名可访问且带参数**的端点，或 1 个**存活子域暴露非公开面**；"
+                  "两者都未证实且无一项被证伪时判决为 withheld，而不是 not_worth。")
+
+
+def _param_names(endpoint: dict) -> list[str]:
+    names = []
+    for param in endpoint.get("params") or []:
+        name = str(param.get("name") if isinstance(param, dict) else param or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def bet(report: dict) -> dict:
+    """Turn evidence into the one thing a decision needs: worth it or not.
+
+    Threshold A, deliberately narrow: a *parameterised* endpoint that answers **without**
+    credentials is the cheapest signal that there is real surface behind the login wall and that
+    it accepts input. A live subdomain exposing a non-public face counts as well.
+
+    The three-state answer is the point. `withheld` means the evidence cannot decide — the
+    identity comparison never ran, or the subdomain half was not probed. Collapsing that into
+    `not_worth` would make the tool lie in the direction that costs the operator an engagement.
+    """
+    report = report or {}
+    meta = report.get("meta") or {}
+    ver = report.get("verification") or {}
+    summary = ver.get("summary") or {}
+    endpoints = report.get("endpoints") or []
+    injected = bool((meta.get("session") or {}).get("enabled"))
+    dual = str(summary.get("identity_model") or "single") == "dual"
+    verify_on = bool(ver.get("enabled", False))
+
+    parameterised = [ep for ep in endpoints
+                     if _param_names(ep) and ep.get("verified") == "usable"]
+    opened, gated, undecided = [], [], []
+    for endpoint in parameterised:
+        if not dual:
+            # No identity was injected: every request this scan made *was* anonymous.
+            opened.append(endpoint)
+        elif endpoint.get("authz_open") is True:
+            opened.append(endpoint)
+        elif endpoint.get("authz_open") is False:
+            gated.append(endpoint)
+        else:
+            undecided.append(endpoint)
+
+    if opened:
+        first, detail = "hit", f"{len(opened)} 个带参数端点无需凭据即可访问"
+    elif undecided or not verify_on:
+        first = "unknown"
+        detail = ("验证未启用，无法判定匿名可访问" if not verify_on
+                  else f"{len(undecided)} 个带参数端点缺少授权对比")
+    elif parameterised:
+        first, detail = "miss", f"{len(gated)} 个带参数端点全部被 401/403 拦住"
+    else:
+        first, detail = "miss", "没有带参数且可用的端点"
+
+    subs = (report.get("assets") or {}).get("subdomains") or []
+    probed_subs = [sub for sub in subs if sub.get("probed")]
+    if probed_subs:
+        second = "hit" if any(sub.get("non_public") for sub in probed_subs) else "miss"
+        second_detail = f"{len(probed_subs)} 个存活子域已探测"
+    elif subs:
+        second, second_detail = "unknown", f"{len(subs)} 个 CT 子域尚未探测（probed:false）"
+    else:
+        second, second_detail = "unknown", "未获得子域情报（或本轮未启用 CT）"
+
+    if first == "hit" or second == "hit":
+        verdict = "worth"
+    elif first == "unknown" or second == "unknown":
+        verdict = "withheld"
+    else:
+        verdict = "not_worth"
+
+    if verdict == "worth":
+        confidence = "high" if len(opened) >= 2 else "medium"
+    elif verdict == "withheld":
+        confidence = "low"
+    else:
+        confidence = "medium" if (report.get("coverage") or {}).get("complete") else "low"
+
+    evidence = [{"path": ep.get("path"), "params": _param_names(ep),
+                 "anon_status": (ep.get("authz") or {}).get("anon_status"),
+                 "why": ("匿名即可访问（双身份对比）" if dual else "本次扫描本身即匿名")}
+                for ep in opened[:10]]
+    writes = [ep for ep in opened
+              if any(str(m).upper() in ("POST", "PUT", "PATCH", "DELETE")
+                     for m in (ep.get("methods") or []))]
+
+    return {
+        "threshold": BET_THRESHOLD,
+        "definition": BET_DEFINITION,
+        "verdict": verdict,
+        "confidence": confidence,
+        "identity": "dual" if dual else ("injected-unverified" if injected else "anonymous"),
+        "criteria": [
+            {"rule": "anonymous_parameterized", "status": first, "detail": detail,
+             "endpoints": [ep.get("path") for ep in opened[:10]]},
+            {"rule": "live_subdomain_nonpublic", "status": second, "detail": second_detail,
+             "count": len(probed_subs)},
+        ],
+        "counts": {"parameterised_usable": len(parameterised), "anonymous_open": len(opened),
+                   "gated": len(gated), "undecided": len(undecided),
+                   "anonymous_open_write": len(writes)},
+        "evidence": evidence,
+        "kill_criteria": [
+            "命中的写端点若全部需要 CSRF token / 二次确认 → 降为「需凭据才能利用」",
+            "带参数端点改为返回 401/403（例如上线了 WAF 规则）→ 判决转 withheld",
+            "子域全部无解析 → 资产面只到主域，第二判据不再成立",
+        ],
+        "unknowns": ([f"{len(undecided)} 个带参数端点缺授权对比"] if undecided else [])
+                    + (["子域未探测"] if second == "unknown" else []),
+        "note": ("三态判决：worth / not_worth / withheld。withheld 表示证据不足以下注，"
+                 "不等于不值得——当成 not_worth 会系统性低估目标。"),
+    }

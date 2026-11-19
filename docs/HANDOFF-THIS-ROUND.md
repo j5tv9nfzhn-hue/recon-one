@@ -104,18 +104,18 @@ recon-one/
 
 | 文件 | 项数 | 覆盖 |
 |---|---|---|
-| `tests/test_pipeline.py` | 70 | 扫描、评分、判定、请求体提取、确定性（含**请求台账逐行一致**）、传输加固、DNS 应答校验、`--no-js` 模式的端点来源与画像注入、**AC25 请求台账完整性与 manifest 哈希** |
+| `tests/test_pipeline.py` | 72 | 扫描、评分、判定、请求体提取、确定性（含**请求台账逐行一致**）、传输加固、DNS 应答校验、`--no-js` 模式的端点来源与画像注入、AC25 请求台账与 manifest 哈希、**AC26 下注判决与两次扫描一致** |
 | `tests/test_concurrency.py` | 11 | 并发与串行同序同结果、共享字节预算、并发度上限 |
 | `tests/test_web.py` | 17 | 令牌一次性、弱密码拒绝、存储边界、CSRF、匿名 GET 拒绝、读取时重算、会话持久化、产物增删查、多目标批次、对比接口 |
 | `tests/test_intel.py` | 19 | CT 只留目标域、CertSpotter 失败回退 crt.sh、失败折叠成 `status`、存档路径与敏感路径、geo/CVE 默认关闭、站点类型规则、**重试吞掉一次 502**、**子域落地成 `probed:false` 资产**、digest 排除运行遥测 |
-| `tests/test_triage.py` | 11 | 权重恒定、指数与带、覆盖率不足拒绝出结论、WAF/版本抬难度、端点面抬价值、`unknown≠fail`、同输入同输出、**主动项接线与权重占比** |
+| `tests/test_triage.py` | 19 | 权重恒定、指数与带、覆盖率不足拒绝出结论、WAF/版本抬难度、端点面抬价值、`unknown≠fail`、同输入同输出、主动项接线与权重占比；**下注判决 8 项**（匿名单身份命中、双身份 gated 不算暴露、withheld 不等于不值得、子域未探 unknown、改判条件必给、纯函数） |
 | `tests/test_doctor.py` | 5 | 五项行为检查全过、版本可读、坏检查被报告而不抛出、CLI 退出码 0/4 |
 | `tests/test_redaction.py` | 28 | 四层定点脱敏（头/URL/证据/密钥）+ **第五层两道扫描**：形状（`hosts[].url`、`intel.archive` 行、`well_known` 正文）与**本次发出凭据的值级遮蔽**（页面标题/正文/`X-Echo-*` 头回显都遮掉，最长值优先，短值不登记，幂等）；`meta.redaction` 可机读 |
 | `tests/test_egress.py` | 16 | E1 代理全量转发（目标零直连、绝对 URI、CONNECT）、E2 系统代理发现/auto 回退/direct/bypass/PAC 标注、E3 SOCKS5 隧道、E4 失败分类 + 只对连接级失败回退一次 + 代理 5xx 记 proxy-error + 凭据不进报告 |
-| `tests/test_verify.py` | 10 | 轻量验证：可用/不可用判定、破坏性路径跳过、预算上限、越界请求被作用域守卫拦下并记录、禁用时零请求、只发 GET、RoE 序列化、TLS 证书探测走 CONNECT |
+| `tests/test_verify.py` | 17 | 验证 v2：可用/不可用判定、破坏性动词按词边界跳过（`/applications` 不被误伤）、预算上限、越界被拦并记录、禁用时零请求、只发 HEAD/GET 绝无 POST、HEAD 被拒补一次 GET、**双身份授权差分**（gated / anonymous_open / same）、单身份不假装做过差分、TLS 证书探测走 CONNECT |
 | `tests/test_session.py` | 34 | 会话注入到达服务端（含重定向）、注入头大小写无关覆盖、`describe()` 不含凭据值且裸 Cookie 只计数、`secrets()` 只登记 ≥6 字符值并按长度降序、`RECONONE_*`、`--header` 语法校验、逐 host 独立限速、`Retry-After` 与指数退避封顶、成功重置、等待上限与预算收缩、真实 429 退避、整包产物零凭据 |
 | `tests/test_cookies.py` | 23 | Set-Cookie 会话保持三层：jar 规则（`Domain`/`Path`/`Secure`/过期/删除/上限、`.com` 与跨域声明拒收、IP 目标不接受 `Domain`、头部顺序稳定）、接线（第二跳自动带 cookie、`--cookie` 同名优先、只发一个 `Cookie` 头、关闭后不发）、端到端（`/app/inner` 由 401 变 200、`meta.session.cookies` 只有名称与计数、整包无 cookie 值、markdown 声明、`use_cookies=False`） |
-| **合计** | **244** | `python -m unittest discover -s tests -t .` 全绿（约 130s，被动情报超时占大头） |
+| **合计** | **261** | `python -m unittest discover -s tests -t .` 全绿（约 67s） |
 
 新增的关键回归：
 
@@ -245,3 +245,32 @@ markdown 写明会话保持、`use_cookies=False` 时不存不发。
 
 测试：`test_ac25_request_ledger_is_complete_and_listed`（字段白名单、编号连续、根 URL 在册、
 manifest 里是真实 sha256 而非 `redacted`）+ `test_ac14_determinism` 里追加"两次扫描台账逐行一致"。
+
+### 6.4 长出第一颗牙：授权差分 + 下注判决（阈值 A，2026-11）
+
+目标从"安全交付"改成"精确到敢下注"，所以这一轮不是资格审定，是把判决做实。
+
+**验证 v2（`verify.py` 184→309 行）**
+
+* 单身份：`HEAD` 判存在，比 GET 便宜且无响应体；服务器拒绝 HEAD（405/501）时补一次 `GET`。
+* 双身份（注入了 `--cookie/--bearer`）：同一端点 **两次 GET**，认证 session + 一个**无凭据 session**，
+  记状态与内容差异 → `gated` / `anonymous_open` / `same` / `unknown`。
+* 破坏性动词从 15 个扩到 37 个，并改成**词边界**匹配：`/account/close`、`/orders/9/refund` 跳过，
+  `/applications` 不再被 `apply` 误伤（这是上一版真会漏扫的 bug）。
+* `RoE.max_requests` 计所有请求（HEAD/GET/双身份），`audit` 逐条记 `requests_used`/`budget_left`。
+
+**下注判决（`triage.bet()`）**
+
+阈值 A：`anonymous_parameterized`（带参数端点无需凭据即可访问）或 `live_subdomain_nonpublic`。
+输出 `verdict ∈ {worth, not_worth, withheld}` + `confidence` + 判据 + 计数 + `evidence` +
+`kill_criteria` + `unknowns`，进 `report.bet`，markdown 用「## 下注判决」领起。
+
+关键的诚实性设计：`withheld` 不等于 `not_worth`。关掉验证、或子域还没探时，工具**拒绝下结论**，
+而不是默认劝退——"看不清就说不值得"会把真正值得的目标劝掉，那比误报更贵。
+
+实测（fixture，带 `--cookie`）：identity `dual`、20 次请求、`authz={same:10}`、判决 `worth/high`、
+判据一命中 2 个带参数端点（含 1 个写端点）。单身份扫描同目标同样 `worth`，但 `bet.identity` 写
+`anonymous`，让人一眼看出"这次没做差分"。
+
+**还没做的**：判据二（子域探活）仍是 `unknown`，所以判决永远带一条 `unknowns`；控制台还没有判决面板
+（只进报告与 markdown）。下一轮就是子域探活 + 定向内容发现。

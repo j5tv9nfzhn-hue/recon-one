@@ -68,17 +68,17 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 | `jsanalyze.py` | 520 | 1 | 前端 JS 静态分析：端点/参数/密钥/主机/source map；`from_paths()` 提供非 JS 来源 |
 | `apiprobe.py` | 145 | 1 | OpenAPI/Swagger 发现与解析、GraphQL introspection、参数聚合 |
 | `intel.py` | 381 | 1 | 被动情报：唯一对外网络出口（可注入），CT 子域 / Wayback 存档 / geo / CVE 逐项 status；单次重试 + 分 provider 超时，永不抛 |
-| `triage.py` | 393 | 1 | 目标画像：10 项价值 + 9 项难度规则表（含两项主动实测）、覆盖率门槛、机会指数（非概率）、passive/active 与权重占比 |
-| `verify.py` | 184 | 2 | 轻量验证：每端点一次 GET（RoE 限定方法/上限/排除词），与作用域守卫双检；产出 usable/unusable/skipped + 逐条 audit |
+| `triage.py` | 515 | 2 | 目标画像：10 项价值 + 9 项难度规则表（含两项主动实测）、覆盖率门槛、机会指数（非概率）、passive/active 与权重占比；**下注判决 `bet()`**（阈值 A：匿名可访问且带参数 / 存活子域暴露非公开面，三态） |
+| `verify.py` | 309 | 2 | 验证 v2：单身份 `HEAD` 判存在（405/501 补一次 GET）、双身份两次 `GET` 做**授权差分**（anon/authed 状态 + 长度/标题差异 → `gated`/`anonymous_open`/`same`）；RoE 方法/上限 + 作用域守卫双检，破坏性动词按词边界跳过 |
 | `inject.py` | 177 | 2 | 会话注入：`--cookie/--bearer/--header` 与 `RECONONE_*` 合成不可变头表；`describe()` 只暴露头名与 Cookie 键名（无键片段只计数），`secrets()` 仅供脱敏层按值遮蔽，值永不进报告 |
 | `rate.py` | 120 | 2 | 逐 host 限速与退避：`1/rate` 间隔、429/503 → `Retry-After` 或指数退避（0.5→8s 封顶）、单次等待上限、`stats()` 记账 |
 | `cookiejar.py` | 251 | 2 | Set-Cookie 会话保持（RFC 6265 实用子集）：`Domain`/`Path` 作用域、`Secure` 双向校验、`Max-Age`/`Expires`/删除、上限淘汰；**只接受目标或其子域的 Domain**，`stats()` 只给名称与计数 |
 | `hypotheses.py` | 165 | 1 | 决策层：把事实转成带前置条件、验证步骤、成本与增益的假设 |
 | `score.py` | 782 | 2 | 证据门控评分：18 个原子检查、两轴、覆盖率门槛、triage 规则树 |
-| `report.py` | 968 | 1 | 报告组装、画像注入、子域资产、主动遥测、`meta.egress`/`meta.roe`/`meta.session`（含 `cookies`）/`meta.rate`、**请求台账 `requests.jsonl`**、验证块、会话与速率摘要、授权块与五层脱敏（含发出凭据的值级遮蔽）、Schema 校验、markdown/handoff 渲染 |
+| `report.py` | 1007 | 1 | 报告组装、画像注入、**下注判决块**、子域资产、主动遥测、`meta.egress`/`meta.roe`/`meta.session`（含 `cookies`）/`meta.rate`、**请求台账 `requests.jsonl`**、验证块、会话与速率摘要、授权块与五层脱敏（含发出凭据的值级遮蔽）、Schema 校验、markdown/handoff 渲染 |
 | `brief.py` | 404 | 1 | AI 简报：授权行 + 画像摘要 + 验证结论 + 会话/速率行 + 按决策价值排序、硬字符预算 |
 | `doctor.py` | 148 | 2 | 依赖自检：行为级验证 httpx 客户端、anyio TaskGroup+限流器、DNS 套接字、TLS 校验；不联网 |
-| `cli.py` | 602 | 2 | 参数解析（`--authorized-by` / `--proxy` 系列 / `--no-verify` / `--cookie` / `--bearer` / `--header` / `--rate` / `--max-backoff` / `--no-cookies`）、出口解析、会话装配（注入 + jar）、验证阶段、阶段编排、`doctor`、退出码 |
+| `cli.py` | 615 | 2 | 参数解析（`--authorized-by` / `--proxy` 系列 / `--no-verify` / `--cookie` / `--bearer` / `--header` / `--rate` / `--max-backoff` / `--no-cookies`）、出口解析、会话装配（注入 + jar + **匿名对照 session**）、验证阶段、阶段编排、`doctor`、退出码 |
 | `web.py` | 738 | 2 | 控制台后端：静态资源 + JSON API（统一鉴权）、多目标并行批次（出口/验证/会话/速率/`use_cookies` 透传）、产物管理、读时重算评分、`/api/compare` |
 | `auth.py` | 228 | 1 | 一次性配对令牌、PBKDF2 密码、30 天持久会话（哈希落盘）与失败限流 |
 
@@ -310,6 +310,25 @@ cookie」的站点我们不发（会少一些发现），收益是绝不会把�
 
 已知边界：不实现 `SameSite`（我们不是跨站上下文）、不做 cookie 前缀（`__Host-`/`__Secure-`）校验、
 不持久化 jar 到磁盘（跨进程复用需要显式重新登录）。
+
+### 4.13 下注判决与授权差分（2026-11）
+
+画像回答"好不好打"，判决回答"要不要下注"。`triage.bet()` 读三样东西——验证结果、端点参数、子域资产——
+产出 `report.bet`（阈值 A）：`verdict ∈ {worth, not_worth, withheld}` + `confidence` + 两条判据 + 计数 +
+`evidence` + `kill_criteria` + `unknowns`。它是纯函数，同输入同输出，因此进 `deterministic_digest`。
+
+判据一要有**授权差分**才成立：同一个端点，用认证 session 与无凭据 session 各 `GET` 一次。两次回答的
+状态与内容差异给出四种结论——`gated`（anon 401/403、authed 2xx：存在但需要身份）、`anonymous_open`
+（anon 2xx 且内容与认证态不同）、`same`（两边一样，可能都是公开页或未登录也能看到的壳）、`unknown`。
+只有 anon 2xx 才计入判据一。
+
+`withheld` 是这套设计里最容易被误用的状态：它表示**证据不足以下注**（验证被关、或子域没探），而不是
+"不值得"。把 withheld 读成 not_worth，会让工具在"看不清"时系统性地劝人放弃——比误报更贵的错误。
+所以判决旁边永远并排列出 `unknowns` 与改判条件。
+
+验证侧 v2 的取法：单身份用 `HEAD`（更便宜、无响应体），405/501 时补一次 `GET`；双身份用两次 `GET`。
+破坏性动词按**词边界**匹配（`/applications` 不会被 `apply` 误伤），每次请求都受 `RoE.max_requests`
+与作用域守卫约束，`audit` 里逐条记录用了几个请求、还剩几个。
 
 ## 5. 产物结构
 

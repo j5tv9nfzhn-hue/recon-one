@@ -216,6 +216,30 @@ class FixtureScan(unittest.TestCase):
         entry = next(a for a in manifest["artifacts"] if a["path"] == "report/requests.jsonl")
         self.assertNotEqual(entry["sha256_16"], "redacted", "台账没有密钥，应当有真实哈希")
 
+    def test_ac26_bet_sheet_leads_the_report(self):
+        """The bet is the headline: three states, the criteria behind them, and kill criteria."""
+        bet = self.report["bet"]
+        self.assertEqual(bet["threshold"], "A")
+        self.assertIn(bet["verdict"], ("worth", "not_worth", "withheld"))
+        self.assertIn(bet["confidence"], ("high", "medium", "low"))
+        self.assertEqual([c["rule"] for c in bet["criteria"]],
+                         ["anonymous_parameterized", "live_subdomain_nonpublic"])
+        self.assertTrue(bet["kill_criteria"], "改判条件必须写明，否则判决不可用")
+        # 本次 fixture 扫描是匿名的：可用的带参数端点即"匿名可访问"，判据一应当命中。
+        self.assertEqual(bet["criteria"][0]["status"], "hit")
+        self.assertEqual(bet["verdict"], "worth")
+        text = open(os.path.join(self.report_dir, "report.md"), encoding="utf-8").read()
+        self.assertIn("## 下注判决", text)
+        self.assertIn("阈值 A", text)
+        self.assertIn("什么会让我改判", text)
+
+    def test_ac26_bet_is_stable_across_identical_scans(self):
+        again = os.path.join(self.tmp, "bet-again")
+        report, _ = run_scan(self.target, again, "fast", {"max_pages": 12},
+                             use_dns=False, quiet=True)
+        self.assertEqual(json.dumps(report["bet"], sort_keys=True, ensure_ascii=False),
+                         json.dumps(self.report["bet"], sort_keys=True, ensure_ascii=False))
+
 
     def test_verification_stage_is_bound_and_recorded(self):
         """轻量验证：每个端点一次 GET；可用/不可用与 RoE 都要写进报告。"""

@@ -16,6 +16,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from reconone import egress as egressmod  # noqa: E402
+from reconone import inject as injectmod  # noqa: E402
 from reconone import verify as verifymod  # noqa: E402
 from reconone.http import Session, probe_tls_certificate  # noqa: E402
 
@@ -51,15 +52,23 @@ class _Quiet(http.server.BaseHTTPRequestHandler):
 
 def _site_factory(counter: _Counter):
     class Handler(_Quiet):
-        def do_GET(self):                      # noqa: N802
-            counter.hit(self.path)
+        def _answer(self, body: bool):         # noqa: FBT001 - test helper
             status = {"/ok": 200, "/protected": 401, "/gone": 404,
                       "/broken": 500, "/needs": 400, "/logout": 200}.get(self.path, 404)
-            body = b"x"
+            payload = b"x" if body else b""
             self.send_response(status)
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Length", "1" if body else "0")
             self.end_headers()
-            self.wfile.write(body)
+            if payload:
+                self.wfile.write(payload)
+
+        def do_HEAD(self):                     # noqa: N802
+            counter.hit(self.path)
+            self._answer(body=False)
+
+        def do_GET(self):                      # noqa: N802
+            counter.hit(self.path)
+            self._answer(body=True)
     return Handler
 
 
@@ -159,10 +168,17 @@ class TestScopeGuardBinding(unittest.TestCase):
         self.assertIn("logout", data["excluded"])
         self.assertIn("RoE", data["note"])
 
-    def test_only_get_is_ever_sent(self):
+    def test_only_head_and_get_are_ever_sent(self):
+        """`HEAD` for existence, `GET` for content: never a state-changing method."""
         seen: list[str] = []
 
         class Handler(_Quiet):
+            def do_HEAD(self):                 # noqa: N802
+                seen.append("HEAD")
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
             def do_GET(self):                  # noqa: N802
                 seen.append("GET")
                 self.send_response(200)
@@ -178,12 +194,44 @@ class TestScopeGuardBinding(unittest.TestCase):
         server, port = _serve(Handler)
         try:
             session = Session("127.0.0.1", timeout=2)
-            roe = verifymod.build_roe("127.0.0.1", max_requests=3)
+            roe = verifymod.build_roe("127.0.0.1", max_requests=5)
             verifymod.run(session, f"http://127.0.0.1:{port}", _endpoints(["/a", "/b"]), roe)
-            self.assertEqual(seen, ["GET", "GET"])
+            self.assertEqual(seen, ["HEAD", "HEAD"], "单身份只需 HEAD，且绝不能出现 POST")
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_a_server_that_refuses_head_is_asked_once_with_get(self):
+        counter = _Counter()
+
+        class GetOnly(_Quiet):
+            def do_GET(self):                  # noqa: N802
+                counter.hit("GET")
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+        server, port = _serve(GetOnly)         # no do_HEAD -> 501 from BaseHTTPRequestHandler
+        try:
+            session = Session("127.0.0.1", timeout=2)
+            roe = verifymod.build_roe("127.0.0.1", max_requests=5)
+            block = verifymod.run(session, f"http://127.0.0.1:{port}", _endpoints(["/a"]), roe)
+            entry = block["results"][0]
+            self.assertEqual(entry["verdict"], verifymod.USABLE)
+            self.assertEqual(entry["checked_with"], "GET", "HEAD 被拒时应当只补一次 GET")
+            self.assertEqual(entry["audit"]["requests_used"], 2)
+            self.assertEqual(counter.paths, ["GET"])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_new_verbs_are_excluded_without_eating_longer_words(self):
+        roe = verifymod.build_roe("example.com")
+        for path in ("/account/close", "/api/void", "/applications/apply", "/orders/9/refund"):
+            self.assertTrue(roe.path_excluded(path), path)
+        for path in ("/applications", "/app/list", "/api/orders", "/closed-beta"):
+            self.assertFalse(roe.path_excluded(path), path)
 
 
 class TestAnnotate(unittest.TestCase):
@@ -225,6 +273,84 @@ class TestTlsProbeUsesEgress(unittest.TestCase):
         out = probe_tls_certificate("127.0.0.1", port=1, timeout=1)
         self.assertEqual(out["egress"], "direct")
         self.assertIn("error_kind", out)
+
+
+
+
+class TestAuthzDifferential(unittest.TestCase):
+    """Two identities, one endpoint: the pair is what turns "exists" into "open"."""
+
+    @classmethod
+    def setUpClass(cls):
+        class Handler(_Quiet):
+            def do_GET(self):                  # noqa: N802
+                cookie = self.headers.get("Cookie") or ""
+                authed = "sid=good" in cookie
+                if self.path == "/gated":
+                    status, body = (200, b"secret panel") if authed else (401, b"login")
+                elif self.path == "/public":
+                    # Open to anyone, but the body differs: that is the interesting signal.
+                    body = b"hello member, your orders and invoices" if authed else b"hello"
+                    status = 200
+                else:
+                    status, body = 200, b"same"
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        cls.server, cls.port = _serve(Handler)
+        cls.base = f"http://127.0.0.1:{cls.port}"
+        cls.authed = Session("127.0.0.1", timeout=3,
+                             injection=injectmod.build("sid=good", ""))
+        cls.anon = Session("127.0.0.1", timeout=3)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def _run(self, paths, **kwargs):
+        roe = verifymod.build_roe("127.0.0.1", max_requests=20,
+                                  identity_model="dual", **kwargs)
+        return verifymod.run(self.authed, self.base, _endpoints(paths), roe,
+                             anon_session=self.anon)
+
+    def test_gated_endpoint_needs_the_identity(self):
+        block = self._run(["/gated"])
+        authz = block["results"][0]["authz"]
+        self.assertEqual(authz["authed_status"], 200)
+        self.assertEqual(authz["anon_status"], 401)
+        self.assertFalse(authz["anon_open"])
+        self.assertTrue(authz["gated"])
+        self.assertEqual(authz["label"], "gated")
+
+    def test_anonymous_open_endpoint_is_flagged(self):
+        block = self._run(["/public"])
+        authz = block["results"][0]["authz"]
+        self.assertTrue(authz["anon_open"], "匿名拿 200 就是匿名可访问")
+        self.assertGreater(authz["body"]["delta_pct"], 10.0, "内容差异是下注的核心信号")
+        self.assertEqual(authz["label"], "anonymous_open")
+        self.assertEqual(block["summary"]["anonymous_open"], 1)
+
+    def test_identical_answers_are_not_mistaken_for_exposure(self):
+        block = self._run(["/same"])
+        self.assertEqual(block["results"][0]["authz"]["label"], "same")
+        self.assertEqual(block["summary"]["anonymous_open"], 0)
+
+    def test_dual_identity_costs_two_requests_per_endpoint(self):
+        block = self._run(["/gated", "/public", "/same"])
+        self.assertEqual(block["summary"]["identity_model"], "dual")
+        self.assertEqual(block["summary"]["requests"], 6)
+        self.assertEqual(block["summary"]["methods"], {"HEAD": 0, "GET": 6})
+
+    def test_single_identity_reports_no_authz_claim(self):
+        roe = verifymod.build_roe("127.0.0.1", max_requests=5)
+        block = verifymod.run(self.authed, self.base, _endpoints(["/public"]), roe)
+        self.assertIsNone(block["results"][0]["authz"],
+                          "只有一个身份时不得假装做过授权对比")
+        self.assertEqual(block["summary"]["identity_model"], "single")
+        self.assertEqual(block["summary"]["authz"], {})
 
 
 if __name__ == "__main__":

@@ -177,5 +177,88 @@ class TestActiveProbeWiring(unittest.TestCase):
         self.assertGreater(weights["observed_share_pct"], 0)
         self.assertLessEqual(weights["observed_share_pct"], 100)
 
+
+
+class TestBet(unittest.TestCase):
+    """Threshold A: is there a parameterised endpoint that answers without credentials?"""
+
+    def _report(self, **over):
+        base = {
+            "meta": {"session": {"enabled": False}},
+            "coverage": {"complete": True},
+            "verification": {"enabled": True, "summary": {"identity_model": "single"}},
+            "endpoints": [],
+            "assets": {"subdomains": []},
+        }
+        base.update(over)
+        return base
+
+    @staticmethod
+    def _endpoint(path="/api/v1/orders", **over):
+        entry = {"path": path, "methods": ["GET"], "params": [{"name": "id"}],
+                 "verified": "usable"}
+        entry.update(over)
+        return entry
+
+    def test_anonymous_parameterised_endpoint_is_worth_the_bet(self):
+        bet = triage.bet(self._report(endpoints=[self._endpoint()]))
+        self.assertEqual(bet["verdict"], "worth")
+        self.assertEqual(bet["criteria"][0]["status"], "hit")
+        self.assertEqual(bet["counts"]["anonymous_open"], 1)
+        self.assertEqual(bet["threshold"], "A")
+
+    def test_confidence_grows_with_the_number_of_hits(self):
+        one = triage.bet(self._report(endpoints=[self._endpoint("/a")]))
+        two = triage.bet(self._report(endpoints=[self._endpoint("/a"), self._endpoint("/b")]))
+        self.assertEqual(one["confidence"], "medium")
+        self.assertEqual(two["confidence"], "high")
+
+    def test_gated_under_dual_identity_is_not_exposure(self):
+        report = self._report(
+            meta={"session": {"enabled": True}},
+            verification={"enabled": True, "summary": {"identity_model": "dual"}},
+            endpoints=[self._endpoint(authz_open=False)],
+            assets={"subdomains": [{"host": "h.example.com", "probed": True}]})
+        bet = triage.bet(report)
+        self.assertEqual(bet["criteria"][0]["status"], "miss")
+        self.assertEqual(bet["counts"]["gated"], 1)
+        self.assertEqual(bet["verdict"], "not_worth")
+
+    def test_anonymous_open_under_dual_identity_is_a_hit(self):
+        report = self._report(
+            meta={"session": {"enabled": True}},
+            verification={"enabled": True, "summary": {"identity_model": "dual"}},
+            endpoints=[self._endpoint(authz_open=True, authz={"anon_status": 200})])
+        bet = triage.bet(report)
+        self.assertEqual(bet["verdict"], "worth")
+        self.assertEqual(bet["evidence"][0]["anon_status"], 200)
+
+    def test_disabled_verification_withholds_instead_of_denying(self):
+        bet = triage.bet(self._report(verification={"enabled": False, "summary": {}},
+                                      endpoints=[self._endpoint(verified=None)]))
+        self.assertEqual(bet["criteria"][0]["status"], "unknown")
+        self.assertEqual(bet["verdict"], "withheld")
+        self.assertIn("withheld", bet["note"])
+
+    def test_unprobed_subdomains_are_reported_as_unknown(self):
+        bet = triage.bet(self._report(assets={"subdomains": [{"host": "a.example.com",
+                                                              "probed": False}]}))
+        self.assertEqual(bet["criteria"][1]["status"], "unknown")
+        self.assertIn("子域未探测", bet["unknowns"])
+        self.assertEqual(bet["verdict"], "withheld")
+
+    def test_kill_criteria_are_always_stated(self):
+        for endpoints in ([self._endpoint()], []):
+            bet = triage.bet(self._report(endpoints=endpoints))
+            self.assertGreaterEqual(len(bet["kill_criteria"]), 2)
+            self.assertTrue(bet["definition"].startswith("A："))
+
+    def test_bet_is_a_pure_function_of_the_report(self):
+        report = self._report(endpoints=[self._endpoint()])
+        first = json.dumps(triage.bet(copy.deepcopy(report)), sort_keys=True)
+        second = json.dumps(triage.bet(copy.deepcopy(report)), sort_keys=True)
+        self.assertEqual(first, second)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

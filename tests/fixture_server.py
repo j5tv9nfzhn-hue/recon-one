@@ -73,6 +73,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def do_HEAD(self):                     # noqa: N802 - the verifier asks with HEAD first
+        # `_send()` already suppresses the body for HEAD, so this is the whole implementation.
+        self.do_GET()
+
     def do_GET(self):
         path = self.path.split("?")[0]
         origin = self.headers.get("Origin", "")

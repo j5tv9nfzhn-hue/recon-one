@@ -328,15 +328,28 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
     web["cors"] = webprobe.probe_cors(session, root_url, sample_paths)
     status["cors"] = "ok"
 
-    # ---- light verification: one GET per endpoint, bound by RoE + scope guard ----------
+    # ---- verification: existence by HEAD, authz by two GETs, bound by RoE + scope guard ----
     # Runs last, after every endpoint source has landed, because it must see the final list.
     verify_targets = list(js.get("endpoints") or [])
     for spec in api.get("specs") or []:
         verify_targets.extend(spec.get("endpoints") or [])
+    # A second, credential-free session is what makes "open without credentials" provable.
+    # It shares the limiter and the egress route so pacing and attribution stay one story.
+    anon_session = None
+    if injection.enabled:
+        anon_session = Session(
+            domain, timeout=limits["timeout"], max_total_bytes=limits["max_total_bytes"],
+            allow_external=allow_external, verify_tls=verify_tls,
+            budget_seconds=limits["budget_seconds"], egress=egress,
+            injection=injectmod.Injection(), limiter=limiter,
+            cookies=cookiejarmod.CookieJar(enabled=use_cookies, scope_domain=domain),
+        )
     roe = verifymod.build_roe(domain, allow_external=allow_external, max_requests=verify_max,
                               enabled=use_verify,
-                              source=("cli:--verify" if use_verify else "cli:--no-verify"))
-    verification = verifymod.run(session, root_url, verify_targets, roe)
+                              source=("cli:--verify" if use_verify else "cli:--no-verify"),
+                              identity_model=("dual" if anon_session is not None else "single"))
+    verification = verifymod.run(session, root_url, verify_targets, roe,
+                                 anon_session=anon_session)
     verifymod.annotate(verify_targets, verification)
     summary = verification.get("summary") or {}
     status["verify"] = ("skipped" if not use_verify else

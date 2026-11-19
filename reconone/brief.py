@@ -146,6 +146,19 @@ def build_brief(report: dict, budget: int = DEFAULT_BUDGET, report_dir: str = ""
     b.add("- 下列信息**已由自动化侦察完成并带证据**，不要重复抓取、下载或逆向前端。")
     b.add("- 端点的 `偏移` 与原文片段在报告包的 `raw/` 内，需要复核时按报告目录定位。")
     b.add("- 「未覆盖」一节列出**确实没做**的事，那才是需要你投入的方向。")
+    # The bet is the first thing a decision-maker needs; put it above the contract lines so a
+    # reader (human or agent) cannot miss it.
+    bet = report.get("bet") or {}
+    if bet:
+        label = {"worth": "值得打", "not_worth": "不值", "withheld": "证据不足（withheld）"}.get(
+            bet.get("verdict"), str(bet.get("verdict")))
+        b.add(f'- **下注判决：{label}**（阈值 {bet.get("threshold", "A")}，置信度 '
+              f'{bet.get("confidence", "low")}，身份模型 {bet.get("identity", "anonymous")}）')
+        for criterion in bet.get("criteria") or []:
+            mark = {"hit": "命中", "miss": "未命中", "unknown": "未判定"}.get(
+                criterion.get("status"), criterion.get("status"))
+            detail = criterion.get("detail", "")
+            b.add(f'  - `{criterion.get("rule")}`：{mark} — {detail}')
     # The brief is the one artefact a downstream agent is told to read first, so the
     # authorised-use line has to be in it: an agent that cannot see the constraint will
     # happily propose steps the operator is not allowed to take.

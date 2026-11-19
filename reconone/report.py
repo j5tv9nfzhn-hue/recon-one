@@ -409,6 +409,9 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
     # reader can verify the whole package with one hash.
     report["intel"] = intel or {}
     report["verification"] = verification or {}
+    # The bet sheet: derived from the verification block and the endpoint list, so it is a pure
+    # function of the evidence. Before redaction (it quotes paths) and before the digest.
+    report["bet"] = triagemod.bet(report)
     # Fifth redaction layer, two passes over the *whole* report, so fields added later
     # (JS-derived host URLs, third-party archive rows, well-known bodies) are covered by
     # default: (a) by shape, and (b) by the literal values this scan actually sent — a target
@@ -767,6 +770,7 @@ def render_markdown(report: dict) -> str:
              f"- 请求数 {report['meta']['requests']}，字节 {report['meta']['bytes']}",
              f"- 覆盖完整：{report['coverage']['complete']}，截断：{report['coverage']['truncated']}", ""]
     lines += _authorization_markdown(report)
+    lines += _bet_markdown(report)
     lines += ["## 覆盖计数", "",
               "| 项 | 数量 |", "|---|---|"]
     for key, value in c.items():
@@ -796,6 +800,41 @@ def render_markdown(report: dict) -> str:
             kinds[err["kind"]] = kinds.get(err["kind"], 0) + 1
         lines += [f"| {k} | {v} |" for k, v in sorted(kinds.items())]
     return "\n".join(lines) + "\n"
+
+
+
+
+def _bet_markdown(report: dict) -> list[str]:
+    """The bet sheet: verdict, the two criteria that produced it, and what would flip it."""
+    bet = report.get("bet") or {}
+    if not bet:
+        return []
+    verdict = bet.get("verdict") or "withheld"
+    label = {"worth": "**值得打**", "not_worth": "**不值**",
+             "withheld": "**证据不足（withheld）**"}.get(verdict, verdict)
+    out = ["", "## 下注判决", "",
+           f"- 判决：{label}（阈值 {bet.get('threshold', 'A')}，置信度 "
+           f"{bet.get('confidence', 'low')}，身份模型 {bet.get('identity', 'anonymous')}）",
+           f"- 定义：{bet.get('definition', '')}"]
+    for criterion in bet.get("criteria") or []:
+        mark = {"hit": "命中", "miss": "未命中", "unknown": "未判定"}.get(
+            criterion.get("status"), criterion.get("status"))
+        out.append(f"- `{criterion.get('rule')}`：{mark} — {criterion.get('detail', '')}")
+        for path in criterion.get("endpoints") or []:
+            out.append(f"  - `{path}`")
+    counts = bet.get("counts") or {}
+    if counts:
+        out.append(f"- 计数：带参数可用 {counts.get('parameterised_usable', 0)} / "
+                   f"匿名开放 {counts.get('anonymous_open', 0)} / "
+                   f"被拦截 {counts.get('gated', 0)} / 未判定 {counts.get('undecided', 0)} / "
+                   f"其中写端点 {counts.get('anonymous_open_write', 0)}")
+    if bet.get("unknowns"):
+        out.append("- 还不确定：" + "；".join(bet["unknowns"]))
+    if bet.get("kill_criteria"):
+        out.append("- 什么会让我改判：")
+        out += [f"  - {item}" for item in bet["kill_criteria"]]
+    out.append("")
+    return out
 
 
 def render_handoff(report: dict) -> str:
