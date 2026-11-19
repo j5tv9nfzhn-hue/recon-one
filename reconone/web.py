@@ -28,7 +28,7 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import cli, config, egress as egressmod, score
+from . import cli, config, decision as decisionmod, egress as egressmod, score
 from . import triage as triagemod
 from . import uncertainty as uncertaintymod
 from . import verify as verifymod
@@ -65,6 +65,10 @@ def _bet_label(bet: dict) -> str:
     return BET_LABELS.get(gross, "")
 
 
+def _decision_label(decision: dict) -> str:
+    return str(((decision or {}).get("headline") or {}).get("label") or "")
+
+
 def _recompute_derived(report: dict) -> dict:
     """Recompute conclusions that are pure functions of the stored evidence.
 
@@ -79,6 +83,7 @@ def _recompute_derived(report: dict) -> dict:
     report["bet"] = triagemod.bet(report)
     report["uncertainty"] = uncertaintymod.build(report, report["bet"])
     report["profile"] = triagemod.build(report, report.get("intel") or {})
+    report["decision"] = decisionmod.build(report)
     return report
 
 
@@ -238,7 +243,7 @@ class Handler(BaseHTTPRequestHandler):
             if not os.path.isdir(full):
                 continue
             entry = {"run": name, "has_report": False, "domain": "", "generated_at": "",
-                     "verdict": "", "score_verdict": "", "bet": "",
+                     "verdict": "", "score_verdict": "", "bet": "", "decision": "",
                      "counts": {}, "bytes": 0, "mtime": 0.0}
             try:
                 entry["mtime"] = os.path.getmtime(full)
@@ -265,8 +270,11 @@ class Handler(BaseHTTPRequestHandler):
                         rep["score"] = score.score_report(rep)
                         _recompute_derived(rep)
                         bet = rep.get("bet") or {}
+                        decision = rep.get("decision") or {}
                         entry["bet"] = str(bet.get("verdict") or "")
-                        entry["verdict"] = _bet_label(bet) or score_label
+                        entry["decision"] = str(decision.get("verdict") or "")
+                        entry["verdict"] = (_decision_label(decision)
+                                            or _bet_label(bet) or score_label)
                     except Exception:                 # noqa: BLE001 - one bad row must not 500
                         entry["verdict"] = score_label
             out.append(entry)
@@ -545,13 +553,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             score_triage = ((report.get("score") or {}).get("triage") or {})
             bet = report.get("bet") or {}
+            decision = report.get("decision") or {}
             reason = {2: "部分探测失败，报告仍可用（coverage.probes 列出未覆盖项）",
                       3: "扫描被拒绝：目标不可达或运行目录不合规"}.get(code, "")
             note(entry, progress=100,
                  state="cancelled" if job.cancel.is_set() else
                        ("done" if code == 0 else ("partial" if code == 2 else "error")),
                  error=reason if code not in (0,) else "",
-                 verdict=_bet_label(bet) or score_triage.get("label", ""),
+                 verdict=(_decision_label(decision) or _bet_label(bet)
+                          or score_triage.get("label", "")),
                  summary=(report.get("score") or {}).get("summary", ""))
 
         try:
@@ -651,10 +661,14 @@ class Handler(BaseHTTPRequestHandler):
             weights = prof.get("weights") or {}
             bet = report.get("bet") or {}
             uncertainty = report.get("uncertainty") or {}
-            next_action = (uncertainty.get("next_actions") or [{}])[0]
+            decision = report.get("decision") or {}
+            next_action = ((decision.get("next_actions")
+                            or uncertainty.get("next_actions") or [{}])[0])
             score_label = str((score_block.get("triage") or {}).get("label") or "")
             row.update({
-                "verdict": _bet_label(bet) or score_label,
+                "verdict": (_decision_label(decision) or _bet_label(bet) or score_label),
+                "decision": str(decision.get("verdict") or ""),
+                "decision_headline": str((decision.get("headline") or {}).get("code") or ""),
                 "bet": str(bet.get("verdict") or ""),
                 "bet_confidence": str(bet.get("confidence") or ""),
                 "bet_identity": str(bet.get("identity") or ""),
@@ -679,8 +693,8 @@ class Handler(BaseHTTPRequestHandler):
             "runs": rows,
             "selected": job.selected,
             "axes": ["worth", "ease", "index"],
-            "note": ("列均按当前模型重算（score / profile / bet）；`index` 为机会指数（非概率），"
-                     "`observed_share_pct` 表示该结论里来自主动实测的权重占比。"),
+            "note": ("列均按当前模型重算（score / profile / bet / uncertainty / decision）；"
+                     "`index` 为机会指数（非概率），`observed_share_pct` 表示主动实测权重占比。"),
         })
 
     def _static(self, rel: str) -> None:

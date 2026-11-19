@@ -189,10 +189,21 @@ class FixtureScan(unittest.TestCase):
         self.assertIn("parameterised_checked_pct", unc["facts"])
         self.assertTrue(unc["next_actions"], "值得打时至少要有确认动作")
         self.assertTrue(unc["verdict_flips"], "判决必须给出可改判路径")
-        with open(os.path.join(self.report_dir, "handoff.md"), encoding="utf-8") as fh:
-            self.assertIn("## 2.1 未知面与改判路径", fh.read())
         with open(os.path.join(self.report_dir, "report.md"), encoding="utf-8") as fh:
-            self.assertIn("## 未知面与下一步", fh.read())
+            self.assertIn("### 下一步", fh.read())
+
+    def test_ac33_decision_is_the_one_canonical_conclusion(self):
+        dec = self.report["decision"]
+        self.assertFalse(dec["is_probability"])
+        self.assertIn("headline", dec)
+        self.assertTrue(dec["headline"]["label"])
+        ids = {f["id"] for f in dec["factors"]}
+        self.assertIn("anonymous_parameterized", ids)
+        self.assertIn("unknown_surface", ids)
+        with open(os.path.join(self.report_dir, "handoff.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("## 决策（先读）", text)
+        self.assertNotIn("## ⚠ 结论", text)
 
     def test_ac31_content_discovery_is_bounded_and_evidence_backed(self):
         disc = self.report["discovery"]
@@ -350,9 +361,10 @@ class FixtureScan(unittest.TestCase):
         self.assertEqual(bet["criteria"][0]["status"], "hit")
         self.assertEqual(bet["verdict"], "worth")
         text = open(os.path.join(self.report_dir, "report.md"), encoding="utf-8").read()
-        self.assertIn("## 下注判决", text)
+        self.assertIn("## 决策", text)
         self.assertIn("阈值 A", text)
         self.assertIn("什么会让我改判", text)
+        self.assertNotIn("## ⚠ 结论", text, "旧 score.triage 不得再作为并列结论")
 
     def test_ac26_bet_is_stable_across_identical_scans(self):
         again = os.path.join(self.tmp, "bet-again")
@@ -1169,9 +1181,9 @@ class TestStaticSiteIsJudgedNotWorth(unittest.TestCase):
     def test_markdown_says_not_worth_in_plain_words(self):
         with open(os.path.join(self.out, "report", "report.md"), encoding="utf-8") as fh:
             text = fh.read()
-        self.assertIn("## 下注判决", text)
-        self.assertIn("**不值**", text)
-        self.assertNotIn("**值得打**", text)
+        self.assertIn("## 决策", text)
+        self.assertIn("**不值", text)
+        self.assertNotIn("**值得打", text)
 
 
 if __name__ == "__main__":

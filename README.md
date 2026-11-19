@@ -36,7 +36,7 @@ cd recon-one
 python -m reconone doctor                     # 先确认 httpx/anyio/ssl/dns 真的能用（1 秒，不联网）
 python -m reconone ui                         # 启动 Web 控制台（前后端同一进程）
 python -m reconone scan --domain example.com --profile default   # 纯命令行
-python -m unittest discover -s tests -t .     # 331 项测试（全部本地、不联网）
+python -m unittest discover -s tests -t .     # 339 项测试（全部本地、不联网）
 ```
 
 常用开关（`scan`）：`--no-js` 不下载前端 bundle、`--no-intel` 关闭被动情报、`--geo` 查 IP 地理位置、
@@ -99,10 +99,10 @@ python -m pip install -r requirements.txt     # 必需，缺失时启动会直�
 `RECONONE_TARGET_PARALLEL`（默认 4，上限 8）并行探测，每个目标独立的运行目录、进度与结论；
 控制台的进度条、每目标进度行与事件流都是**实时推送**（600ms 轮询），不需要刷新页面。
 
-**产物管理**：`/产物` 页列出 `runs/` 下所有报告包（目标、生成时间、端点数、下注判决、体积），
+**产物管理**：`/产物` 页列出 `runs/` 下所有报告包（目标、生成时间、端点数、决策、体积），
 可以切换当前查看的产物（服务端会按当前模型重算 `score / profile / bet`），或删除不再需要的目录（二次确认）。
 
-**可视化**：首屏是**下注判决**（值得打 / 不值 / 证据不足 + 两条判据 + 改判条件），其下把三个数字画成
+**可视化**：首屏是**决策**（值得打 / 有面但无出口 / 不值 / 先补证据 + 关键因素 + 下一步），其下把三个数字画成
 **三轴雷达图**（价值 / 易度 / 机会指数，0–100，未采集的轴显示为空而不是 0），旁边是**端点风险分布
 环形图**（按 `primary / secondary / inventory` 三档）与子域、主动探测强度、依赖版本三块紧凑信息。另有 **`/对比`** 视图：把多份产物的价值、易度、机会指数、子域数、端点数和
 「主动实测权重占比」并排列出，点一行即可切到该产物——回答「先看哪一个」。
@@ -173,7 +173,7 @@ python -m reconone ui --host 0.0.0.0                       # 仅在你确知网�
 输出 `index / band / range` 且 `is_probability=false` —— 它是可解释的机会排序，不是漏洞概率。
 `rate_limit` 与 `mfa` 静态不可观测，永远是 `unknown`。详见 [docs/INTEL.md](docs/INTEL.md)。
 
-### 1.3 下注判决：worth / not_worth / withheld
+### 1.3 匿名面判决：worth / not_worth / withheld（证据层）
 
 画像解决"好不好打"，**判决**解决"要不要下注"。报告顶层有 `bet` 块（阈值 A），两条判据：
 
@@ -220,6 +220,23 @@ python -m reconone ui --host 0.0.0.0                       # 仅在你确知网�
 它是纯函数，进 `deterministic_digest`；`report.md`、`handoff.md`（§2.1）、`brief.md` 与概览卡片读的是
 同一份排序。
 
+### 1.5 唯一结论：`decision`（收敛后的决策层）
+
+`profile`、`bet`、`uncertainty` 和旧的 `score.triage` 都曾有“看起来像结论”的字段。现在顶层只有一个
+`decision` 块，其余都是它的证据层：
+
+- `verdict`：匿名面判决（`worth` / `not_worth` / `withheld`），来自 `bet`。
+- `headline`：给人看的唯一结论，例如「值得打」「有技术面，但交付出口未确认」「不值（当前证据）」
+  「先补证据（当前判不了）」「当前证据不支持投入，但仍有可升级项」。
+- `factors`：匿名面（判据一/二）、业务价值代理、外围阻力、未知面、交付出口，每项带
+  `supports / opposes / uncertain / neutral` 与值；业务价值是代理信号，不等于真实业务价值。
+- `next_actions` / `verdict_flips`：直接复用 `uncertainty` 的排序动作与改判路径。
+- `confidence`：只会在存在高影响未测面或画像覆盖不足时**下调**，不会凭空上调。
+
+`score.triage` 不再是结论，只保留为交付/维护信号；报告正文的「评分信号的边界」和「评分明细」都
+明确写这一点。`report.md`、`handoff.md`（首段「决策（先读）」）、`brief.md`、概览首屏、产物列表与
+对比表都读同一个 `decision.headline`。
+
 ## 2. 报告格式与交付方式
 
 一次扫描产出一个自包含目录：
@@ -257,7 +274,7 @@ runs/<domain>/
 
 | 约束 | 实现 | 可验证方式 |
 |---|---|---|
-| 体积 | 30 个 Python 模块 + 4 个规则 JSON，源码约 481 KB | `python -c "import glob,os;print(sum(os.path.getsize(f) for f in glob.glob('reconone/*.py')))"` |
+| 体积 | 31 个 Python 模块 + 4 个规则 JSON，源码约 496 KB | `python -c "import glob,os;print(sum(os.path.getsize(f) for f in glob.glob('reconone/*.py')))"` |
 | 依赖（必需） | 只用标准库实现探测逻辑；DNS 自行实现 UDP/TCP 查询（无 dnspython）。`httpx` + `anyio` 是并发的必需依赖，缺失时启动即报错并提示安装命令 | `python -m pip install -r requirements.txt`；`tests` 全绿 |
 | 无外部服务 | 所有请求直达目标；默认禁止跨域请求 | `--allow-external` 关闭时 `scope_blocks` 拦截 |
 | 单一入口 | `python -m reconone scan` | — |
@@ -267,7 +284,7 @@ runs/<domain>/
 
 ## 4. 验收标准
 
-完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。32 条验收项由测试断言。当前全仓 **331 tests OK**（`test_pipeline` 83 / `test_concurrency` 17 / `test_discovery` 13 / `test_uncertainty` 7 / `test_web` 17 / `test_intel` 19 / `test_triage` 26 / `test_doctor` 5 / `test_redaction` 28 / `test_egress` 16 / `test_verify` 19 / `test_session` 35 / `test_cookies` 24 / `test_subdomains` 22），`python -m unittest discover -s tests -t .` 可直接复现。
+完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。33 条验收项由测试断言。当前全仓 **339 tests OK**（`test_pipeline` 84 / `test_concurrency` 17 / `test_decision` 7 / `test_discovery` 13 / `test_uncertainty` 7 / `test_web` 17 / `test_intel` 19 / `test_triage` 26 / `test_doctor` 5 / `test_redaction` 28 / `test_egress` 16 / `test_verify` 19 / `test_session` 35 / `test_cookies` 24 / `test_subdomains` 22），`python -m unittest discover -s tests -t .` 可直接复现。
 
 ## 5. 已知限制
 
@@ -296,15 +313,16 @@ runs/<domain>/
 ```
 recon-one/
   reconone/    cli(编排) config http dns webprobe crawl jsanalyze apiprobe intel(被动情报)
-               triage(画像) uncertainty(未知面/改判路径) hypotheses(决策) score(评分)
-               report(组装) brief(简报) verify(轻量验证) discovery(定向内容发现)
+               triage(画像) uncertainty(未知面/改判路径) decision(唯一结论) hypotheses(战术)
+               score(评分) report(组装) brief(简报) verify(轻量验证) discovery(定向内容发现)
                inject(会话注入) cookiejar(Set-Cookie) rate(限速退避) egress(出口)
                redact(脱敏) doctor(依赖自检) concurrency(并发) auth(凭据) web(控制台) util
   rules/       technologies.json (47 条), secrets.json (17 条), score.json (权重与评级),
                discovery.json (技术栈/公共路径候选，非字典)
-  tests/       fixture_server.py, test_pipeline.py, test_concurrency.py, test_discovery.py,
-               test_uncertainty.py, test_web.py, test_intel.py, test_triage.py, test_doctor.py,
-               test_redaction.py, test_egress.py, test_verify.py, test_session.py, test_cookies.py
+  tests/       fixture_server.py, test_pipeline.py, test_concurrency.py, test_decision.py,
+               test_discovery.py, test_uncertainty.py, test_web.py, test_intel.py, test_triage.py,
+               test_doctor.py, test_redaction.py, test_egress.py, test_verify.py, test_session.py,
+               test_cookies.py
   docs/        ARCHITECTURE.md, INTEL.md（被动/主动与画像算法）, ACCEPTANCE.md, SCORING.md,
                WEB-UI.md, RESEARCH.md, AUTHORIZED-USE.md 等
   SECURITY.md  仓库级授权声明 + 本工具漏洞报告渠道 + 五层脱敏范围

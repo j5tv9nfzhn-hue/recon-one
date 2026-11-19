@@ -77,9 +77,10 @@ if not headers:
 理由：3/5 项通过 = 60% 分，读起来像 D，但实际是 40% 的权重从未评估过。
 「小样本高分」正是评级产品最典型的失真。
 
-## 结论（triage）是规则树，不是第二个分数
+## 交付/维护信号（triage）是规则树，不是结论
 
-`score.triage()` 的输出必定引用**驱动它的检查项 id**，因此分歧可以追溯到具体观测：
+`score.triage()` 现在只是**交付/维护信号**，不是报告的结论；唯一结论是 `report.decision`（见
+`docs/ARCHITECTURE.md` §4.18）。它的输出必定引用**驱动它的检查项 id**，因此分歧可以追溯到具体观测：
 
 ```
 insufficient-evidence  min(hygiene, opportunity).coverage_pct < 60%，一切结论不可信

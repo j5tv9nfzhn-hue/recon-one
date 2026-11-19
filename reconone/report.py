@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from . import decision as decisionmod
 from . import discovery as discoverymod
 from . import doctor as doctormod
 from . import http as httpmod
@@ -463,6 +464,9 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
     sent = (session.injection.secrets() if getattr(session, "injection", None) else ())
     report = redactmod.scrub_report(report, secrets=sent)
     report["profile"] = triagemod.build(report, report["intel"])
+    # The single canonical conclusion. `bet` / `profile` / `uncertainty` stay as its
+    # evidence layers; `score.triage` is a signal, not a competing verdict.
+    report["decision"] = decisionmod.build(report)
     report["meta"]["deterministic_digest"] = sha256_text(
         canonical_json(_digest_view(report)))[:16]
     return report
@@ -595,7 +599,7 @@ def _score_markdown(report: dict) -> list[str]:
             a.get("earned_weight", 0), a.get("evaluated_weight", 0)))
     lines += ["", f"**{block.get('summary', '')}**", ""]
     verdict = block.get("triage") or {}
-    if verdict:
+    if verdict and not report.get("decision"):
         lines += ["---", "", f"## ⚠ 结论：{verdict.get('label', '')}", "",
                   verdict.get("why", ""), ""]
         if verdict.get("actions"):
@@ -608,6 +612,16 @@ def _score_markdown(report: dict) -> list[str]:
         if verdict.get("drivers"):
             lines += ["判定依据（引用的检查项）：", ""] + \
                      [f"- `{d}`" for d in verdict["drivers"]] + [""]
+        lines += ["---", ""]
+    elif verdict:
+        # `score.triage` is a deliverability/maintenance signal. Keeping its old
+        # "结论" heading next to `decision` was exactly the competing layer this
+        # convergence removes.
+        lines += ["---", "", "## 评分信号的边界", "",
+                  "> 评分轴只描述外围配置，不构成是否值得打的结论；结论见「决策」。", ""]
+        if verdict.get("blind_spots"):
+            lines += ["本评分不覆盖：", ""] + [f"- {b}" for b in verdict["blind_spots"]]
+            lines += ["", "> 外围配置分**不能**用于判断鉴权、租户隔离、容器/沙箱边界或业务逻辑。", ""]
         lines += ["---", ""]
 
     unknown = [c for c in (block.get("checks") or []) if c.get("status") == "unknown"]
@@ -875,8 +889,12 @@ def render_markdown(report: dict) -> str:
              f"- 请求数 {report['meta']['requests']}，字节 {report['meta']['bytes']}",
              f"- 覆盖完整：{report['coverage']['complete']}，截断：{report['coverage']['truncated']}", ""]
     lines += _authorization_markdown(report)
-    lines += _bet_markdown(report)
-    lines += _uncertainty_markdown(report)
+    if report.get("decision"):
+        lines += _decision_markdown(report)
+    else:
+        # Old packages keep their original two sections; new packages have one decision.
+        lines += _bet_markdown(report)
+        lines += _uncertainty_markdown(report)
     lines += ["## 覆盖计数", "",
               "| 项 | 数量 |", "|---|---|"]
     for key, value in c.items():
@@ -944,6 +962,51 @@ def _bet_markdown(report: dict) -> list[str]:
     return out
 
 
+def _decision_markdown(report: dict) -> list[str]:
+    """The one conclusion: headline, factors, next actions and flip paths."""
+    decision = report.get("decision") or {}
+    if not decision:
+        return []
+    headline = decision.get("headline") or {}
+    bet = report.get("bet") or {}
+    lines = ["", "## 决策", "",
+             f"- 结论：**{headline.get('label') or '未评估'}**"
+             f"（置信度 {decision.get('confidence') or 'low'}；"
+             f"匿名面判决 `{decision.get('verdict') or 'unknown'}`；"
+             f"阈值 {bet.get('threshold', 'A')}）",
+             f"- 为什么：{decision.get('why', '')}"]
+    if bet.get("definition"):
+        lines.append(f"- 定义：{bet.get('definition')}")
+    factors = decision.get("factors") or []
+    signal_label = {"supports": "支持", "opposes": "阻碍",
+                    "uncertain": "未知", "neutral": "中性"}
+    if factors:
+        lines += ["", "| 因素 | 信号 | 值 | 说明 |", "|---|---|---|---|"]
+        for factor in factors:
+            lines.append(f"| {factor.get('label')} | "
+                         f"{signal_label.get(factor.get('status'), factor.get('status'))} | "
+                         f"{factor.get('value')} | {factor.get('detail')} |")
+    actions = decision.get("next_actions") or []
+    if actions:
+        lines += ["", "### 下一步（按影响 × 请求成本排序）", "",
+                  "| # | 影响 | 预计请求 | 未知项 | 下一步 |", "|---:|---|---:|---|---|"]
+        for item in actions:
+            lines.append(f"| {item.get('rank')} | {item.get('impact')} | "
+                         f"{item.get('cost_requests')} | {item.get('title')} | "
+                         f"{item.get('action')} |")
+    flips = decision.get("verdict_flips") or []
+    if flips:
+        lines += ["", "### 什么会让我改判", ""]
+        for flip in flips:
+            lines.append(f"- `{flip.get('from')}` → `{flip.get('to')}`："
+                         f"{flip.get('condition')}"
+                         f"（约 {flip.get('cost_requests', 0)} 次请求）")
+    if decision.get("note"):
+        lines += ["", f"> {decision['note']}"]
+    lines.append("")
+    return lines
+
+
 def _uncertainty_markdown(report: dict) -> list[str]:
     """What is still unmeasured, ranked by impact and request cost (never a probability)."""
     block = report.get("uncertainty") or {}
@@ -983,6 +1046,36 @@ def _uncertainty_markdown(report: dict) -> list[str]:
     return lines
 
 
+def _decision_handoff(report: dict) -> list[str]:
+    decision = report.get("decision") or {}
+    if not decision:
+        return []
+    headline = decision.get("headline") or {}
+    out = ["## 决策（先读）", "",
+           f"- **{headline.get('label') or '未评估'}**"
+           f"（置信度 {decision.get('confidence') or 'low'}；"
+           f"匿名面判决 `{decision.get('verdict') or 'unknown'}`）",
+           f"- 为什么：{decision.get('why', '')}", ""]
+    signal_label = {"supports": "支持", "opposes": "阻碍",
+                    "uncertain": "未知", "neutral": "中性"}
+    for factor in (decision.get("factors") or [])[:4]:
+        out.append(f"- {factor.get('label')}（"
+                   f"{signal_label.get(factor.get('status'), factor.get('status'))}）："
+                   f"{factor.get('value')} — {factor.get('detail')}")
+    actions = decision.get("next_actions") or []
+    if actions:
+        out.append("")
+        for item in actions[:3]:
+            out.append(f"- **下一步 {item.get('rank')}. {item.get('title')}**"
+                       f"（{item.get('impact')} 影响，约 {item.get('cost_requests')} 次请求）："
+                       f"{item.get('action')}")
+    for flip in decision.get("verdict_flips") or []:
+        out.append(f"- 改判路径 `{flip.get('from')}` → `{flip.get('to')}`："
+                   f"{flip.get('condition')}（约 {flip.get('cost_requests', 0)} 次请求）")
+    out += ["", "---", ""]
+    return out
+
+
 def render_handoff(report: dict) -> str:
     """The document an operator or an agent reads first: what is known, what is not, what next."""
     counts = report["coverage"]["counts"]
@@ -992,6 +1085,7 @@ def render_handoff(report: dict) -> str:
     lines = [
         f"# HANDOFF — {report['target']['domain']}",
         "",
+    ] + _decision_handoff(report) + [
         "## 0. 使用约定",
         f"- 报告 schema：`{report['schema']}`；机器读取请用 `report/report.json`，不要解析本文件。",
         f"- 资产哈希见 `report/manifest.json`；原始证据在 `raw/`，端点证据带 file+offset。",
@@ -1041,7 +1135,7 @@ def render_handoff(report: dict) -> str:
         "",
     ]
     unc = report.get("uncertainty") or {}
-    if unc:
+    if unc and not report.get("decision"):
         ufacts = unc.get("facts") or {}
         lines += ["## 2.1 未知面与改判路径（不是概率）", "",
                   f"- 带参端点已判定 {ufacts.get('parameterised_answered', 0)}/"

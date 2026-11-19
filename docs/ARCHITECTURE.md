@@ -13,7 +13,7 @@ recon-one/
   start-recon-one.pyw        双击启动 Web 控制台（pythonw 会重新拉起带控制台的 python.exe）
   docs/
     ARCHITECTURE.md          本文
-    ACCEPTANCE.md            32 条验收标准与逐条对应测试
+    ACCEPTANCE.md            33 条验收标准与逐条对应测试
     RESEARCH.md              同类工具能力边界调研（设计依据）
   reconone/                  唯一源码包，主干只用标准库（并发层可选 httpx+anyio）
   rules/                     数据驱动的规则表（JSON，非代码）
@@ -70,6 +70,7 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 | `intel.py` | 381 | 1 | 被动情报：唯一对外网络出口（可注入），CT 子域 / Wayback 存档 / geo / CVE 逐项 status；单次重试 + 分 provider 超时，永不抛 |
 | `triage.py` | 577 | 2 | 目标画像：10 项价值 + 9 项难度规则表（含两项主动实测）、覆盖率门槛、机会指数（非概率）、passive/active 与权重占比；**下注判决 `bet()`**（阈值 A，三态；判据一按 `authz_open` 的观测判定，未验证端点阻止否决；判据二只能升级不能否决，观测压过 IP 默认值） |
 | `uncertainty.py` | 339 | 2 | **未知面与改判路径**：把未验证带参端点、未探子域、验证关闭、JS 跳过、发现未跑/被拦截/截断等折成 `unknowns`；按影响/请求成本排序；输出 `next_actions` 与 `verdict_flips`；显式非概率 |
+| `decision.py` | 178 | 2 | **唯一结论**：组合 `bet`（匿名面）、`profile`（业务价值代理/阻力）、`uncertainty`（未知面）与 security.txt（交付出口）；输出 headline/factors/next_actions/verdict_flips；confidence 只下调；显式非概率 |
 | `verify.py` | 333 | 2 | 验证 v2：单身份 `HEAD` 判存在（405/501 补一次 GET）、双身份两次 `GET` 做**授权差分**（anon/authed 状态 + 长度/标题差异 → `gated`/`anonymous_open`/`same`）；`annotate()` 把“存在”（`verified`）与“匿名开放”（`authz_open`，单身份 2xx/3xx、双身份仅 `anonymous_open`）分开；RoE 方法/上限 + 作用域守卫双检，破坏性动词按词边界跳过 |
 | `discovery.py` | 381 | 2 | **定向内容发现**：候选 = JS/spec 目录前缀 + 技术栈路径表 + 少量公共路径；**根 + 按目录前缀**的确定性不存在路径做 404/soft-404 基线；GET-only、上限硬截断、破坏性路径跳过；positive 行以 `sources=["content-discovery"]` 进入端点清单，不声称匿名开放 |
 | `inject.py` | 177 | 2 | 会话注入：`--cookie/--bearer/--header` 与 `RECONONE_*` 合成不可变头表；`describe()` 只暴露头名与 Cookie 键名（无键片段只计数），`secrets()` 仅供脱敏层按值遮蔽，值永不进报告 |
@@ -78,11 +79,11 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 | `subs.py` | 182 | 2 | 子域探活：CT 名字逐个 `GET /`（HTTPS 传输层失败回退一次 HTTP）、`gated`/`exposed`/`public`/`dead` 判定表（**登录墙只认结构化信号，导航栏 Login 文字不算**）、**只探目标或其子域**（越界记录不发请求）、主机数上限；`stats()` 只给计数 |
 | `hypotheses.py` | 165 | 1 | 决策层：把事实转成带前置条件、验证步骤、成本与增益的假设 |
 | `score.py` | 782 | 2 | 证据门控评分：18 个原子检查、两轴、覆盖率门槛、triage 规则树 |
-| `report.py` | 1194 | 1 | 报告组装、画像注入、**下注判决块**、**未知面/下一步块**、子域资产（证书声明 + 探活观测合一行）、**定向内容发现块与端点合并**、主动遥测、`meta.egress`/`meta.roe`/`meta.session`（含 `cookies`）/`meta.rate`/`meta.subdomains`、**请求台账 `requests.jsonl`**、验证块、会话与速率摘要、授权块与五层脱敏（含发出凭据的值级遮蔽）、Schema 校验、markdown/handoff/brief 渲染；`truncated` 只由预算触发，脚本 404 计入 `scripts_failed`；handoff 按实际身份模型写认证态 |
-| `brief.py` | 435 | 1 | AI 简报：授权行 + 画像摘要 + 验证结论 + 未知面下一步 + 内容发现计数 + 会话/速率行 + 按决策价值排序、硬字符预算 |
+| `report.py` | 1288 | 1 | 报告组装、画像注入、**唯一决策块**、下注判决/未知面证据层、子域资产（证书声明 + 探活观测合一行）、**定向内容发现块与端点合并**、主动遥测、`meta.egress`/`meta.roe`/`meta.session`（含 `cookies`）/`meta.rate`/`meta.subdomains`、**请求台账 `requests.jsonl`**、验证块、会话与速率摘要、授权块与五层脱敏（含发出凭据的值级遮蔽）、Schema 校验、markdown/handoff/brief 渲染；`truncated` 只由预算触发，脚本 404 计入 `scripts_failed`；handoff 首段是决策，按实际身份模型写认证态 |
+| `brief.py` | 455 | 1 | AI 简报：授权行 + **唯一决策 headline + 关键因素 + 下一步** + 画像摘要 + 验证结论 + 内容发现计数 + 会话/速率行、硬字符预算 |
 | `doctor.py` | 148 | 2 | 依赖自检：行为级验证 httpx 客户端、anyio TaskGroup+限流器、DNS 套接字、TLS 校验；不联网 |
 | `cli.py` | 709 | 2 | 参数解析（`--authorized-by` / `--proxy` 系列 / `--no-verify` / `--no-discovery` / `--discovery-max` / `--cookie` / `--bearer` / `--header` / `--rate` / `--max-backoff` / `--no-cookies` / `--no-subdomains` / `--subdomain-max`）、出口解析、会话装配（注入 + jar + **匿名对照 session**）、**子域探活阶段**、**按 testability 排序的验证队列**、**定向内容发现阶段**、阶段编排、`doctor`、退出码 |
-| `web.py` | 799 | 2 | 控制台后端：静态资源 + JSON API（统一鉴权）、多目标并行批次（出口/验证/会话/速率/`use_cookies`/`use_discovery` 透传）、产物管理、**读时重算 `score / profile / bet / uncertainty`**、`bet` 与未知项进入产物列表/对比/进度行、`/api/compare` |
+| `web.py` | 813 | 2 | 控制台后端：静态资源 + JSON API（统一鉴权）、多目标并行批次（出口/验证/会话/速率/`use_cookies`/`use_discovery` 透传）、产物管理、**读时重算 `score / profile / bet / uncertainty / decision`**、`decision.headline` 进入产物列表/对比/进度行、`/api/compare` |
 | `auth.py` | 228 | 1 | 一次性配对令牌、PBKDF2 密码、30 天持久会话（哈希落盘）与失败限流 |
 
 `web.py` 与 `cli.py` 之间是**单向**依赖：控制台不含任何探测逻辑，所以命令行与浏览器产出**字节一致**的报告。
@@ -132,8 +133,9 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
     │                                       │
     └─► report.assemble() ◄─────────────────┘
           │  ├── score.score_report()   18 个原子检查 → 两轴分数 + triage
-          │  ├── triage.bet()           阈值 A 判决（worth / not_worth / withheld）
+          │  ├── triage.bet()           阈值 A 匿名面判决（证据层）
           │  ├── uncertainty.build()    未知面排序 + next_actions + verdict_flips
+          │  ├── decision.build()       唯一结论 headline + factors + 下一步
           │  ├── validate()      JSON Schema 子集校验
           │  ├── deterministic_digest  排除时间戳的稳定摘要
           │  ├── brief.build_brief()   brief.md（必须在 write_all 之前写，否则不进 manifest）
@@ -329,6 +331,7 @@ cookie」的站点我们不发（会少一些发现），收益是绝不会把�
 画像回答"好不好打"，判决回答"要不要下注"。`triage.bet()` 读三样东西——验证结果、端点参数、子域资产——
 产出 `report.bet`（阈值 A）：`verdict ∈ {worth, not_worth, withheld}` + `confidence` + 两条判据 + 计数 +
 `evidence` + `kill_criteria` + `unknowns`。它是纯函数，同输入同输出，因此进 `deterministic_digest`。
+**注意：`bet` 现在是匿名面证据层，唯一结论是 `report.decision`（见 4.18）。**
 
 判据一要有**观测**才成立，而“端点存在”与“匿名可访问”是两件事：`verified=usable` 只说明路径存在
 （401/403/405/429 都算），`authz_open` 才回答是否无需凭据。单身份扫描本身是匿名的，因此只有 2xx/3xx
@@ -387,10 +390,10 @@ login 类主机名、登录标题、`please authenticate`）、`public`（公开
 失败尝试（`status=0` + `error` kind），否则「`meta.requests=1`、台账 0 行」会同时为真。
 
 **控制台的结论必须重算，不能读缓存。** `/api/report` 与 `/api/compare` 不只重算 `score`，还调用
-`triage.bet()` / `triage.build()` 重算 `bet` / `profile`，并先用存储的 `verification` 重新
-`annotate()` 端点（旧报告的 `verified` 不能被当成 `authz_open`）。产物列表、对比表和批量进度行
-都以下注判决为主，评分层标签保留为 tooltip；概览首屏显示判决、判据、未知项与改判条件，旧的评分层
-结论移到「评分明细」旁注。
+`triage.bet()` / `triage.build()` / `uncertainty.build()` / `decision.build()` 重算
+`bet` / `profile` / `uncertainty` / `decision`，并先用存储的 `verification` 重新 `annotate()` 端点
+（旧报告的 `verified` 不能被当成 `authz_open`）。产物列表、对比表和批量进度行都以
+`decision.headline` 为主，评分层标签只作为 tooltip；概览首屏显示唯一结论、关键因素与下一步。
 
 ### 4.16 定向内容发现：有界候选 + 基线证据（2026-11）
 
@@ -433,6 +436,23 @@ login 类主机名、登录标题、`please authenticate`）、`public`（公开
 
 同一份排序被 `report.md`、`handoff.md`（§2.1）、`brief.md` 与概览卡片消费；`/api/report` 读时重算
 `uncertainty`，所以旧报告的下一步不会借缓存还魂。
+
+### 4.18 决策层收敛：唯一结论（2026-11）
+
+早期有四个“像结论”的块：`score.triage`（交付/维护树）、`profile`（价值/难度）、`bet`（匿名面）、
+`uncertainty`（未测面）。它们可以互相矛盾，读者无法判断哪个是答案。现在：
+
+* **`report.decision` 是唯一结论。** `headline` 只给五种状态：值得打、有技术面但交付出口未确认、
+  不值（当前证据）、当前不值但仍有可升级项、先补证据（当前判不了）。
+* **其余块降为证据层。** `bet` 提供匿名面判决；`profile` 提供业务价值代理与阻力；`uncertainty`
+  提供 unknown/next_actions/verdict_flips；security.txt 只表示“观察到披露渠道”，缺失不作为否决。
+* **confidence 只下调。** 存在高影响未测面（不含 `confirm` 动作）或画像覆盖 < 60% 时降一级；
+  没有“分数高就升置信度”的路径。
+* **`score.triage` 不再作为结论展示。** 评分章节改名为「评分信号的边界」；`report.md` 只有一个
+  `## 决策`，`handoff.md` 首段是「决策（先读）」，`brief.md` 与概览/产物列表/对比表读同一个
+  `decision.headline`。
+* `decision` 是 `bet + profile + uncertainty` 的纯函数，进 `deterministic_digest`；旧报告在
+  `/api/report` 读时重算。
 
 ## 5. 产物结构
 

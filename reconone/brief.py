@@ -146,31 +146,51 @@ def build_brief(report: dict, budget: int = DEFAULT_BUDGET, report_dir: str = ""
     b.add("- 下列信息**已由自动化侦察完成并带证据**，不要重复抓取、下载或逆向前端。")
     b.add("- 端点的 `偏移` 与原文片段在报告包的 `raw/` 内，需要复核时按报告目录定位。")
     b.add("- 「未覆盖」一节列出**确实没做**的事，那才是需要你投入的方向。")
-    # The bet is the first thing a decision-maker needs; put it above the contract lines so a
-    # reader (human or agent) cannot miss it.
-    bet = report.get("bet") or {}
-    if bet:
-        label = {"worth": "值得打", "not_worth": "不值", "withheld": "证据不足（withheld）"}.get(
-            bet.get("verdict"), str(bet.get("verdict")))
-        b.add(f'- **下注判决：{label}**（阈值 {bet.get("threshold", "A")}，置信度 '
-              f'{bet.get("confidence", "low")}，身份模型 {bet.get("identity", "anonymous")}）')
-        for criterion in bet.get("criteria") or []:
-            mark = {"hit": "命中", "miss": "未命中", "unknown": "未判定"}.get(
-                criterion.get("status"), criterion.get("status"))
-            detail = criterion.get("detail", "")
-            b.add(f'  - `{criterion.get("rule")}`：{mark} — {detail}')
-    unc = report.get("uncertainty") or {}
-    if unc:
-        ufacts = unc.get("facts") or {}
-        actions = unc.get("next_actions") or []
-        top = actions[0] if actions else {}
-        b.add(f"- **未知面**：带参端点已判定 {ufacts.get('parameterised_answered', 0)}/"
-              f"{ufacts.get('parameterised_total', 0)}；子域已探 "
-              f"{ufacts.get('subdomains_probed', 0)}/{ufacts.get('subdomains_total', 0)}；"
-              f"下一步：{top.get('title') or '无'}（约 {top.get('cost_requests', 0)} 次请求）")
-        for flip in (unc.get("verdict_flips") or [])[:2]:
+    # The decision is the first thing a decision-maker needs; evidence layers stay below.
+    decision = report.get("decision") or {}
+    if decision:
+        headline = decision.get("headline") or {}
+        b.add(f'- **决策：{headline.get("label") or "未评估"}**'
+              f'（置信度 {decision.get("confidence") or "low"}；'
+              f'匿名面判决 {decision.get("verdict") or "unknown"}）')
+        b.add(f'- 为什么：{decision.get("why", "")}')
+        signal_label = {"supports": "支持", "opposes": "阻碍",
+                        "uncertain": "未知", "neutral": "中性"}
+        for factor in (decision.get("factors") or [])[:4]:
+            b.add(f'  - {factor.get("label")}'
+                  f'（{signal_label.get(factor.get("status"), factor.get("status"))}）：'
+                  f'{factor.get("value")}')
+        for item in (decision.get("next_actions") or [])[:3]:
+            b.add(f'  - 下一步 {item.get("rank")}. {item.get("title")}'
+                  f'（约 {item.get("cost_requests")} 次请求）：{item.get("action")}')
+        for flip in (decision.get("verdict_flips") or [])[:2]:
             b.add(f"  - 改判路径 `{flip.get('from')}` → `{flip.get('to')}`："
                   f"{flip.get('condition')}")
+    else:
+        bet = report.get("bet") or {}
+        if bet:
+            label = {"worth": "值得打", "not_worth": "不值",
+                     "withheld": "证据不足（withheld）"}.get(
+                bet.get("verdict"), str(bet.get("verdict")))
+            b.add(f'- **下注判决：{label}**（阈值 {bet.get("threshold", "A")}，置信度 '
+                  f'{bet.get("confidence", "low")}，身份模型 {bet.get("identity", "anonymous")}）')
+            for criterion in bet.get("criteria") or []:
+                mark = {"hit": "命中", "miss": "未命中", "unknown": "未判定"}.get(
+                    criterion.get("status"), criterion.get("status"))
+                detail = criterion.get("detail", "")
+                b.add(f'  - `{criterion.get("rule")}`：{mark} — {detail}')
+        unc = report.get("uncertainty") or {}
+        if unc:
+            ufacts = unc.get("facts") or {}
+            actions = unc.get("next_actions") or []
+            top = actions[0] if actions else {}
+            b.add(f"- **未知面**：带参端点已判定 {ufacts.get('parameterised_answered', 0)}/"
+                  f"{ufacts.get('parameterised_total', 0)}；子域已探 "
+                  f"{ufacts.get('subdomains_probed', 0)}/{ufacts.get('subdomains_total', 0)}；"
+                  f"下一步：{top.get('title') or '无'}（约 {top.get('cost_requests', 0)} 次请求）")
+            for flip in (unc.get("verdict_flips") or [])[:2]:
+                b.add(f"  - 改判路径 `{flip.get('from')}` → `{flip.get('to')}`："
+                      f"{flip.get('condition')}")
     # The brief is the one artefact a downstream agent is told to read first, so the
     # authorised-use line has to be in it: an agent that cannot see the constraint will
     # happily propose steps the operator is not allowed to take.

@@ -42,8 +42,9 @@ recon-one/
 ## 3. 读取时重算（重要）
 
 `GET /api/report` **不相信磁盘上的派生结论**，每次都丢弃它们并用当前模型重算：`score`、`profile`、
-`bet` 与 `uncertainty` 都从同一份证据重新计算；重算 `bet` 之前先用存储的 `verification` 重新
-`annotate()` 端点，避免旧报告的 `verified` 被当成 `authz_open`。`/api/compare` 与 `/api/runs` 同理。
+`bet`、`uncertainty` 与最终的 `decision` 都从同一份证据重新计算；重算 `bet` 之前先用存储的
+`verification` 重新 `annotate()` 端点，避免旧报告的 `verified` 被当成 `authz_open`。
+`/api/compare` 与 `/api/runs` 同理。
 
 原因是一个真实事故：`free.ai` 的报告在磁盘上带着旧版判定
 「维护较好且成本不低，酌情放弃」。改动模型后，界面立刻从文件里读回了这条已经作废的结论 ——
@@ -155,9 +156,9 @@ CapacityLimiter）。两者都在 `requirements.txt` 里，且是**硬依赖**�
 | 实时进度 | 单条自调度轮询：运行中 600ms、空闲 3s；同时取 `/api/state` 与 `/api/events?since=`，增量追加事件、更新总进度与每目标进度行。**不需要刷新页面**，批次结束后自动拉取报告与产物列表 | 浏览器实测 7%→17%→47%→85%→100%，目标行 `running → partial` |
 | 侧边栏导航 | 7 个视图（扫描/产物/概览/评分明细/端点/参数/日志）全部可进；切换走 `location.hash`（`#/runs`），刷新后停留在同一视图；没有报告时给出「去扫描」空态卡片，而不是禁用按钮 | 7 个视图逐一断言 `shown/active/hash/title` |
 | 视觉与交互 | 设计令牌（色彩/圆角/间距/动效）→ 组件；深色为默认、浅色同为一等公民；三套预设（Tangerine / Soft Pop / Brutalist）切换主色与圆角骨骼；`.view`/`.form`/`.app` 的 `display` 规则与 `[hidden]` 显式对齐 | 浏览器截图核对登录页、扫描页、产物页、概览页 |
-| 产物管理 | `GET /api/runs` 列表（目标/时间/端点/发现/**下注判决**/体积、当前产物高亮）、`POST /api/runs/select` 切换、`POST /api/runs/delete` 删除（二次确认 + 名字白名单 + 解析后仍在 runs 根下）；列表读取时重算 `score/profile/bet` | `tests/test_web.py::TestServer::test_runs_api_lists_selects_and_deletes` |
+| 产物管理 | `GET /api/runs` 列表（目标/时间/端点/发现/**决策**/体积、当前产物高亮）、`POST /api/runs/select` 切换、`POST /api/runs/delete` 删除（二次确认 + 名字白名单 + 解析后仍在 runs 根下）；列表读取时重算 `score/profile/bet/uncertainty/decision` | `tests/test_web.py::TestServer::test_runs_api_lists_selects_and_deletes` |
 | 多目标并行 | 一次提交最多 12 个目标；`ThreadPoolExecutor` 按 `RECONONE_TARGET_PARALLEL`（默认 4，上限 8）并行跑 `cli.run_scan`；每个目标独立 out_dir/进度/**判决**，聚合进度取均值 | `TestParallelTargets::test_batch_tracks_every_target` |
-| 下注判决 | 概览首屏：值得打 / 不值 / 证据不足 + 两条判据 + 未知项 + 改判条件；数据取 `report.bet`，旧的 `score.triage` 结论移到「评分明细」旁注 | `test_web.py::test_report_is_rescored_on_read`、`test_compare_lists_every_run_with_three_decision_axes` |
+| 决策 | 概览首屏：唯一 headline（值得打 / 有面但无出口 / 不值 / 先补证据等）+ 关键因素 + 下一步；数据取 `report.decision`。`score.triage` 不再作为结论，仅在评分章节保留为其信号的边界 | `test_web.py::test_report_is_rescored_on_read`、`test_compare_lists_every_run_with_three_decision_axes` |
 | 未知面与下一步 | 独立卡片：带参端点/子域覆盖率、未完成阶段、按影响×请求成本排序的前 5 个动作（含样本与动作说明）、改判路径；数据取 `report.uncertainty`，所有值走 textContent | `tests/test_uncertainty.py`、`test_pipeline.py::FixtureScan::test_ac32_uncertainty_block_ranks_the_next_actions` |
 | 免登录 | 首次令牌 → 设置一次密码；会话以 `sha256(sid)` 存 `state/sessions.json`，TTL 30 天，cookie 带 `Max-Age`；设置密码会清空既有会话 | `TestRememberedSessions` 4 项 |
 | 目标画像 | 概览视图顶部卡片：worth / hardness / 机会指数 + band + 覆盖率 + 类型/子域/地理/unknown 列表；数值直接取 `report.profile`，前端不二次计算 | `TestNoJsMode::test_profile_is_attached_and_says_what_is_unknown`、`tests/test_triage.py` |
@@ -195,7 +196,7 @@ CapacityLimiter）。两者都在 `requirements.txt` 里，且是**硬依赖**�
 颜色不是唯一信息载体（数值文本始终存在）；`prefers-reduced-motion: reduce` 时关闭 160ms 淡入。
 
 **对比视图**（`#/compare`，侧栏「对比」）：进入时单次 `GET /api/compare`，表格列出目标、生成时间、
-**下注判决**、未知项数、价值、易度、机会指数（带 band）、子域/端点/发现数、主动实测权重占比；每行「查看」调用
+**决策**、未知项数、价值、易度、机会指数（带 band）、子域/端点/发现数、主动实测权重占比；每行「查看」调用
 `POST /api/runs/select` 后切回概览。`score/profile/bet` 都在服务端按当前模型重算，评分层标签保留为
 tooltip。空态给「去扫描」，接口失败在视图内显示错误文本，行级 `error` 渲染在判决列并禁用该行的
 「查看」——**不轮询**，也不把读不出来的产物当成 0 分。

@@ -206,7 +206,8 @@ class TestServer(unittest.TestCase):
                              "易度 = 100 - 难度（按重算后的难度）")
         self.assertEqual(row["counts"]["endpoints"], 4)
         self.assertEqual(row["bet"], "withheld", "没有验证证据的旧报告只能 withheld")
-        self.assertEqual(row["verdict"], "证据不足")
+        self.assertEqual(row["decision"], "withheld")
+        self.assertIn("先补证据", row["verdict"])
         self.assertEqual(data["axes"], ["worth", "ease", "index"])
         self.assertTrue(data["note"])
         self.assertFalse(row["error"])
@@ -249,7 +250,9 @@ class TestServer(unittest.TestCase):
         # score, profile and bet are all derived; none may be read back from disk.
         self.assertIn("profile", payload)
         self.assertIn("bet", payload)
+        self.assertIn("decision", payload)
         self.assertEqual(payload["bet"]["verdict"], "withheld")
+        self.assertEqual(payload["decision"]["verdict"], "withheld")
         # The old verdict must never be echoed back, whatever the new score computes.
         self.assertNotEqual(triage["verdict"], "low-yield")
         self.assertNotIn("酌情放弃", triage.get("label", ""))

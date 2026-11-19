@@ -1173,11 +1173,23 @@
     const axes = score.axes || {};
     const bet = rep.bet || {};
     const betLabel = BET_LABEL[bet.verdict] || "";
+    const decision = rep.decision || {};
+    const headline = decision.headline || {};
+    const FACTOR_STATUS = {
+      supports: "支持", opposes: "阻碍", uncertain: "未知", neutral: "中性",
+    };
 
-    /* 下注判决是首屏结论；旧的评分层结论移到「评分明细」作为旁注。 */
+    /* decision 是唯一结论；bet/profile/uncertainty 只在它下面作为证据。 */
     const acts = $("verdictActs");
     acts.replaceChildren();
-    if (betLabel) {
+    if (headline.label) {
+      $("verdictLabel").textContent = `决策：${headline.label}`;
+      renderRichText($("verdictWhy"), decision.why || "");
+      for (const factor of decision.factors || []) {
+        acts.appendChild(el("li", null,
+          `${factor.label}（${FACTOR_STATUS[factor.status] || factor.status}）：${factor.value}`));
+      }
+    } else if (betLabel) {
       $("verdictLabel").textContent = `下注判决：${betLabel}`;
       const criteria = (bet.criteria || [])
         .map((c) => `${c.rule}：${BET_STATUS[c.status] || c.status} — ${c.detail || ""}`);
@@ -1193,9 +1205,9 @@
       renderRichText($("verdictWhy"), triage.why || "");
       for (const a of triage.actions || []) acts.appendChild(el("li", null, a));
     }
-    $("scoreVerdictNote").textContent = triage.label
-      ? `评分层结论：${triage.label}${triage.why ? " — " + triage.why : ""}`
-      : "";
+    $("scoreVerdictNote").textContent = headline.label
+      ? "评分明细只提供信号；是否值得打以顶部「决策」为准。"
+      : (triage.label ? `评分层信号：${triage.label}` : "");
 
     /* 两个轴 */
     const hy = axes.hygiene || {};
