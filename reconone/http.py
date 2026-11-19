@@ -10,6 +10,8 @@ import zlib
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from . import egress as egressmod
+from . import inject as injectmod
+from . import rate as ratemod
 from .config import DEFAULT_UA
 from .util import in_scope
 
@@ -91,7 +93,8 @@ class Session:
     def __init__(self, domain: str, timeout: float = 12.0, max_total_bytes: int = 40_000_000,
                  allow_external: bool = False, max_body: int = 4_000_000,
                  verify_tls: bool = True, user_agent: str = DEFAULT_UA,
-                 budget_seconds: float | None = None, egress=None):
+                 budget_seconds: float | None = None, egress=None,
+                 injection=None, limiter=None):
         self.domain = domain.lower()
         self.timeout = timeout
         self.max_total_bytes = max_total_bytes
@@ -117,6 +120,10 @@ class Session:
         # which keeps every existing caller (and test) on today's behaviour.
         self.egress = egress if egress is not None else egressmod.Egress()
         self.fallback_count = 0
+        # Session credentials and per-host pacing. Both default to "off", so existing callers
+        # keep today's behaviour byte for byte.
+        self.injection = injection if injection is not None else injectmod.Injection()
+        self.limiter = limiter if limiter is not None else ratemod.Limiter()
 
     # -- scope -----------------------------------------------------------------
     def in_scope(self, url: str) -> bool:
@@ -251,12 +258,16 @@ class Session:
             hdrs.update(headers)
         started = time.time()
         conn = None
+        waited = self.limiter.before(host, deadline=self.deadline)
         try:
             conn, target, extra = self._open(scheme, host, port, proxy, path_query)
             if extra:
                 hdrs.update(extra)
+            hdrs = self.injection.apply(hdrs)
             conn.request(method, target, body=data, headers=hdrs)
             raw = conn.getresponse()
+            self.limiter.after(host, raw.status,
+                               {str(k).lower(): v for k, v in raw.getheaders()})
             if proxy is not None and raw.status in (502, 503, 504):
                 # A proxy answering 5xx means the *proxy* could not reach the target. Treating
                 # that as a page would make "unreachable" look "scannable": the run would be
@@ -285,7 +296,7 @@ class Session:
             if self.bytes_total >= self.max_total_bytes:
                 self.exhausted = True
             self.log.append({"url": url, "status": raw.status, "bytes": len(body),
-                             "ms": elapsed, "method": method,
+                             "ms": elapsed, "method": method, "wait_ms": int(waited * 1000),
                              "egress": "proxy" if proxy else "direct"})
             return Response(url, raw.status, resp_headers, body, elapsed, truncated=truncated,
                             header_list=header_list)

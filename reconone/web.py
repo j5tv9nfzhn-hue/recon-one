@@ -436,6 +436,9 @@ class Handler(BaseHTTPRequestHandler):
                 bool(body.get("geo", False)), bool(body.get("cve", False)),
                 str(body.get("authorized_by") or ""), egress,
                 bool(body.get("verify", True)), int(body.get("verify_max") or 40),
+                str(body.get("cookie") or ""), str(body.get("bearer") or ""),
+                [str(h) for h in (body.get("headers") or [])],
+                float(body.get("rate") or 0), float(body.get("max_backoff") or 8),
             ))
             job.thread.start()
         self._json(200, {"ok": True, "targets": targets, "parallel": job.parallel,
@@ -444,7 +447,8 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ batch runner
     def _run_batch(self, targets, profile, allow_external, use_dns, use_graphql, verify_tls,
                    use_js=True, use_intel=True, geo=False, cve=False, authorized_by="",
-                   egress=None, use_verify=True, verify_max=40):
+                   egress=None, use_verify=True, verify_max=40,
+                   cookie="", bearer="", headers=(), rate=0.0, max_backoff=8.0):
         job: Job = self.server.job
         out_root = ensure_dir(os.path.join(self.server.root, "runs"))
 
@@ -485,6 +489,8 @@ class Handler(BaseHTTPRequestHandler):
                     use_js=use_js, use_intel=use_intel, geo=geo, cve=cve,
                     authorized_by=authorized_by, egress=egress, use_verify=use_verify,
                     verify_max=verify_max,
+                    cookie=cookie, bearer=bearer, headers=headers, rate=rate,
+                    max_backoff=max_backoff, injection_source="web",
                     on_event=lambda ev: on_event(entry, ev), cancel=job.cancel,
                 )
             except cli.ScanCancelled:

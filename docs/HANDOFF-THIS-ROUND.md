@@ -106,14 +106,15 @@ recon-one/
 |---|---|---|
 | `tests/test_pipeline.py` | 68 | 扫描、评分、判定、请求体提取、确定性、传输加固、DNS 应答校验、`--no-js` 模式的端点来源与画像注入 |
 | `tests/test_concurrency.py` | 11 | 并发与串行同序同结果、共享字节预算、并发度上限 |
-| `tests/test_web.py` | 16 | 令牌一次性、弱密码拒绝、存储边界、CSRF、匿名 GET 拒绝、读取时重算、会话持久化、产物增删查、多目标批次、对比接口 |
+| `tests/test_web.py` | 17 | 令牌一次性、弱密码拒绝、存储边界、CSRF、匿名 GET 拒绝、读取时重算、会话持久化、产物增删查、多目标批次、对比接口 |
 | `tests/test_intel.py` | 19 | CT 只留目标域、CertSpotter 失败回退 crt.sh、失败折叠成 `status`、存档路径与敏感路径、geo/CVE 默认关闭、站点类型规则、**重试吞掉一次 502**、**子域落地成 `probed:false` 资产**、digest 排除运行遥测 |
 | `tests/test_triage.py` | 11 | 权重恒定、指数与带、覆盖率不足拒绝出结论、WAF/版本抬难度、端点面抬价值、`unknown≠fail`、同输入同输出、**主动项接线与权重占比** |
 | `tests/test_doctor.py` | 5 | 五项行为检查全过、版本可读、坏检查被报告而不抛出、CLI 退出码 0/4 |
 | `tests/test_redaction.py` | 20 | 四层定点脱敏（头/URL/证据/密钥）+ **第五层整份报告形状扫描**：`hosts[].url`、`intel.archive` 行、`well_known` 正文里的凭据都不出现，计数/路径/Cookie 属性保留，清洗幂等，`meta.redaction` 例外可机读 |
 | `tests/test_egress.py` | 16 | E1 代理全量转发（目标零直连、绝对 URI、CONNECT）、E2 系统代理发现/auto 回退/direct/bypass/PAC 标注、E3 SOCKS5 隧道、E4 失败分类 + 只对连接级失败回退一次 + 代理 5xx 记 proxy-error + 凭据不进报告 |
 | `tests/test_verify.py` | 10 | 轻量验证：可用/不可用判定、破坏性路径跳过、预算上限、越界请求被作用域守卫拦下并记录、禁用时零请求、只发 GET、RoE 序列化、TLS 证书探测走 CONNECT |
-| **合计** | **177** | `python -m unittest discover -s tests -t .` 全绿（约 60s） |
+| `tests/test_session.py` | 31 | 会话注入到达服务端（含重定向）、注入头大小写无关覆盖、`describe()` 不含凭据值、`RECONONE_*`、`--header` 语法校验、逐 host 独立限速、`Retry-After` 与指数退避封顶、成功重置、等待上限与预算收缩、真实 429 退避、整包产物零凭据 |
+| **合计** | **209** | `python -m unittest discover -s tests -t .` 全绿（约 60s） |
 
 新增的关键回归：
 
@@ -156,3 +157,30 @@ recon-one/
 - **被动情报没有限流与重试策略**：单次请求、失败即 `unavailable`；Wayback 慢时宁可给 unknown
 
 前两条正是「后续依赖第三方库」的落点，见 `docs/WEB-UI.md` 第 7 节与 `docs/third-party-libs.md` 第 4 节。
+
+## 6. 本轮追加：会话注入 + 逐 host 限速（2026-11）
+
+匿名扫描只能看到登录墙，401/403 无法区分「存在但需授权」与「不存在」。本轮补上两个模块：
+
+* `reconone/inject.py`：`--cookie` / `--bearer` / `--header`（或 `RECONONE_*`）合成不可变头表，
+  在 `Session._attempt()` 唯一一处合并，重定向后仍带；`describe()` 只输出头名、Cookie 键名、
+  是否 Bearer → `meta.session`。**值永不落盘**（有目录级测试遍历整包产物断言）。
+* `reconone/rate.py`：`--rate N` 逐 host 间隔、429/503 → `Retry-After` 或 0.5→8s 指数退避，
+  只推后该 host 的下一次请求，成功即重置；单次等待上限 5s 且受扫描时间预算约束 →
+  `meta.rate`、`session.log[].wait_ms`。
+
+顺带修掉两个真实缺陷（都由新测试抓出）：
+
+1. `lstrip("Bearer ")` 按**字符集**剥离，`envtok` 被削成 `nvtok` —— token 首字母落在
+   `B/e/a/r/空格` 里就会被改坏；改为精确前缀匹配。
+2. `--bearer` 简写会覆盖同一名字的显式 `--header "Authorization: …"`；改为显式头优先。
+
+报告新增 `meta.session` / `meta.rate` 与 markdown「会话与速率（只记录形状，不记录值）」小节，
+brief 增加一行摘要；`digest` 排除这两块——「带了谁、跑多快」不是目标属性，同一目标两次扫描
+必须得到同一摘要。控制台通过 API body 透传这些字段，界面刻意不提供输入框（避免 token 进入
+浏览器存储 / DOM）。
+
+控制台路径同样被覆盖：`tests/test_web.py::TestConsoleSessionPassThrough` 走真实 `/api/scan`，
+断言 body 里的 `cookie/bearer/headers/rate` 进入报告（`meta.session.source == "web"`），
+且**进度事件流非空**。最后一条是为了钉住本轮修掉的回归：`_run_batch` 曾把
+`on_event`/`cancel` 一起丢掉，扫描照样出报告，只是控制台再也没有阶段消息、也无法取消。

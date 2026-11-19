@@ -1,14 +1,14 @@
 # 验收标准
 
-22 条验收项由 `tests/test_pipeline.py`（AC1–AC15）、`tests/test_triage.py`（AC16–AC17）、`tests/test_doctor.py`（AC18）、`tests/test_web.py`（AC19）、`tests/test_redaction.py`（AC20）、`tests/test_egress.py`（AC21）与 `tests/test_verify.py`（AC22）自动断言；运行：
+23 条验收项由 `tests/test_pipeline.py`（AC1–AC15）、`tests/test_triage.py`（AC16–AC17）、`tests/test_doctor.py`（AC18）、`tests/test_web.py`（AC19）、`tests/test_redaction.py`（AC20）、`tests/test_egress.py`（AC21）、`tests/test_verify.py`（AC22）与 `tests/test_session.py`（AC23）自动断言；运行：
 
 ```powershell
 python -m unittest discover -s tests -t .
 ```
 
-当前结果：**177 tests OK**（`test_pipeline.py` 69 / `test_concurrency.py` 11 / `test_web.py` 16 /
+当前结果：**209 tests OK**（`test_pipeline.py` 69 / `test_concurrency.py` 11 / `test_web.py` 17 /
 `test_intel.py` 19 / `test_triage.py` 11 / `test_doctor.py` 5 / `test_redaction.py` 20 /
-`test_egress.py` 16 / `test_verify.py` 10），全部走本地靶站或纯函数，不访问公网。
+`test_egress.py` 16 / `test_verify.py` 10 / `test_session.py` 31），全部走本地靶站或纯函数，不访问公网。
 
 ## 验收矩阵
 
@@ -36,6 +36,7 @@ python -m unittest discover -s tests -t .
 | AC20 | 第五层兜底脱敏：`assets.hosts[].url`、`report.intel` 的 Wayback 行、`assets.well_known` 正文里的凭据形状都被抹掉，而计数/路径/Cookie 属性原样保留；重复清洗结果不变 | `test_redaction.py::TestWholeReportSweep::test_fields_that_used_to_leak_are_covered` / `test_strict_keys_are_masked_and_already_masked_values_are_left_alone` |
 | AC21 | 出口（E1–E4）：`--proxy` 后所有请求经代理、目标零直连；系统代理从 env/WinINET 发现且 PAC 显式标注不支持；SOCKS5 可用；失败分类为 `connect-timeout/reset/refused/tls`，只有连接级失败回退一次，代理 5xx 记为 `proxy-error` 而不当页面 | `test_egress.py::TestProxyEgress` / `TestSystemProxy` / `TestSocks5` / `TestFailureClassification` |
 | AC22 | 轻量验证：每端点一次 GET，可用（2xx/3xx/401/403/405/429）标红、404/410 与连接失败标灰；RoE 限定方法与上限、破坏性路径不发送、越界请求被作用域守卫拦下且记录；`meta.roe` + `verification.summary` 可追溯；TLS 证书探测与请求走同一出口 | `test_verify.py`（10 项）/ `test_pipeline.py::FixtureScan::test_verification_stage_is_bound_and_recorded` |
+| AC23 | 会话注入与限速：Cookie/Bearer/自定义头到达服务端且重定向后仍携带；`meta.session` 只含头名与 Cookie 键名，测试凭据不出现在任何产物文件；`--rate N` 按 host 独立限速（`wait_ms` 逐请求记账），429/503 按 `Retry-After` 或指数退避（0.5→8s 封顶）推后该 host 的下一次请求，成功即重置；单次等待有上限且受预算约束 | `test_session.py`（31 项） |
 
 > AC13 的「必备小节」由测试断言为 3 个（已确认事实 / 未覆盖项 / 建议动作）；`handoff.md` 实际含 5 节，
 > 停机条件在第 4 节。文档与断言以**测试**为准。
@@ -58,6 +59,10 @@ python -m unittest discover -s tests -t .
 Wayback 路径与敏感路径识别、geo/CVE 默认关闭与显式开启、站点类型规则命中与未命中；
 `test_triage.py` 覆盖权重恒定、机会指数与带信息、覆盖率不足时拒绝出结论、WAF/版本抬高难度、
 端点面抬高价值。
+`test_session.py` 覆盖：Cookie/Bearer/自定义头到达服务端、注入头大小写无关覆盖调用方头、重定向后仍携带、
+`describe()` 不含任何凭据值、`RECONONE_*` 环境变量读取、`--header` 语法错误、逐 host 独立限速、
+`Retry-After` 与指数退避封顶、成功重置、单次等待上限与预算收缩、真实靶站上的 429 退避、以及
+「整包产物不含凭据」的目录级断言。
 
 ## 端到端冒烟（非自动，人工执行）
 

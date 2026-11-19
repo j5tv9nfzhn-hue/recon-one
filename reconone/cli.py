@@ -16,6 +16,8 @@ from . import brief as briefmod
 from . import doctor as doctormod
 from . import intel as intelmod
 from . import verify as verifymod
+from . import inject as injectmod
+from . import rate as ratemod
 from . import webprobe
 from .config import (AUTHORIZED_USE, AUTHORIZED_USE_SHORT, PROFILES, RESERVED_RUN_NAMES,
                      VERSION, ensure_out_dir, find_existing_run, profile as load_profile,
@@ -122,7 +124,9 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
              on_event=None, cancel=None, use_js: bool = True, use_intel: bool = True,
              geo: bool = False, cve: bool = False, authorized_by: str = "",
              egress=None, use_verify: bool = True,
-             verify_max: int = verifymod.DEFAULT_MAX_REQUESTS) -> tuple[dict, int]:
+             verify_max: int = verifymod.DEFAULT_MAX_REQUESTS,
+             cookie: str = "", bearer: str = "", headers=(), rate: float = 0.0,
+             max_backoff: float = 8.0, injection_source: str = "cli") -> tuple[dict, int]:
     """Run every probe once. `on_event` receives stage dicts; `cancel` is polled between stages.
 
     `use_js=False` skips bundle download + JS analysis entirely: endpoints then come from
@@ -142,10 +146,15 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
         return guard, 3
     started_at = now_iso()
     clock = time.time()
+    # Credentials: explicit flags win over RECONONE_* env vars (argv is visible in the process
+    # list, so the env form is the recommended one for real tokens).
+    injection = (injectmod.build(cookie, bearer, headers, source=injection_source)
+                 if (cookie or bearer or headers) else injectmod.from_env())
+    limiter = ratemod.Limiter(rate, max_backoff=max_backoff)
     session = Session(
         domain, timeout=limits["timeout"], max_total_bytes=limits["max_total_bytes"],
         allow_external=allow_external, verify_tls=verify_tls, budget_seconds=limits["budget_seconds"],
-        egress=egress,
+        egress=egress, injection=injection, limiter=limiter,
     )
 
     # `cancel` may be a callable predicate (older callers) or a threading.Event (the web
@@ -420,6 +429,10 @@ def cmd_scan(args) -> int:
                             quiet=args.quiet, use_js=not args.no_js,
                             use_intel=not args.no_intel, geo=args.geo, cve=args.cve,
                             authorized_by=getattr(args, "authorized_by", ""), egress=egress,
+                            cookie=getattr(args, "cookie", ""), bearer=getattr(args, "bearer", ""),
+                            headers=getattr(args, "header", ()) or (),
+                            rate=getattr(args, "rate", 0.0),
+                            max_backoff=getattr(args, "max_backoff", 8.0),
                             use_verify=not getattr(args, "no_verify", False),
                             verify_max=getattr(args, "verify_max", verifymod.DEFAULT_MAX_REQUESTS))
     if args.json:
@@ -525,6 +538,16 @@ def build_parser() -> argparse.ArgumentParser:
                       help="skip the light verification stage (endpoints stay unverified claims)")
     scan.add_argument("--verify-max", type=int, default=verifymod.DEFAULT_MAX_REQUESTS,
                       help="hard cap of verification requests; one GET per endpoint, RoE-bound")
+    scan.add_argument("--cookie", default="", metavar="STR",
+                      help="Cookie header for every request (or RECONONE_COOKIE)")
+    scan.add_argument("--bearer", default="", metavar="TOKEN",
+                      help="Authorization: Bearer <token> for every request (or RECONONE_BEARER)")
+    scan.add_argument("--header", action="append", default=[], metavar="'Name: Value'",
+                      help="extra header, repeatable (or RECONONE_HEADERS, newline separated)")
+    scan.add_argument("--rate", type=float, default=0.0, metavar="N",
+                      help="max requests per second per host (0 = unlimited)")
+    scan.add_argument("--max-backoff", type=float, default=8.0, metavar="S",
+                      help="cap for the per-host throttle backoff in seconds")
     scan.add_argument("--geo", action="store_true",
                       help="look up the resolved IP's location via ip-api.com (sends the IP to a third party)")
     scan.add_argument("--cve", action="store_true",

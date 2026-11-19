@@ -244,6 +244,19 @@ def build_brief(report: dict, budget: int = DEFAULT_BUDGET, report_dir: str = ""
         state = "" if ver.get("enabled", True) else "（本次未启用）"
         b.add(f"- 验证{state}：可用（红）{s.get('usable', 0)} / 不可用（灰）{s.get('unusable', 0)}"
               f" / 跳过 {s.get('skipped', 0)}，已验证请求 {s.get('requests', 0)}/{s.get('max_requests', 0)}")
+    sess = (report.get("meta") or {}).get("session") or {}
+    rate = (report.get("meta") or {}).get("rate") or {}
+    if sess.get("enabled") or float(rate.get("rate_per_s") or 0) > 0 or rate.get("throttled"):
+        bit = []
+        if sess.get("enabled"):
+            bit.append(f"注入 {', '.join(sess.get('headers') or []) or '—'}"
+                       f"（{sess.get('source') or 'cli'}，值不记录）")
+        if float(rate.get("rate_per_s") or 0) > 0:
+            bit.append(f"{rate.get('rate_per_s')}/s per host，等待 {rate.get('waits', 0)} 次"
+                       f"/{rate.get('slept_s', 0)}s")
+        if rate.get("throttled"):
+            bit.append(f"429/503 {rate.get('throttled')} 次，最大退避 {rate.get('max_backoff_s', 0)}s")
+        b.add("- 会话/速率：" + "；".join(bit))
     if gaps:
         b.add("")
         b.add("**未覆盖（不要当作已排除，这些是真空区）**")

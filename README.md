@@ -36,17 +36,29 @@ cd recon-one
 python -m reconone doctor                     # 先确认 httpx/anyio/ssl/dns 真的能用（1 秒，不联网）
 python -m reconone ui                         # 启动 Web 控制台（前后端同一进程）
 python -m reconone scan --domain example.com --profile default   # 纯命令行
-python -m unittest discover -s tests -t .     # 177 项测试（全部本地、不联网）
+python -m unittest discover -s tests -t .     # 209 项测试（全部本地、不联网）
 ```
 
 常用开关（`scan`）：`--no-js` 不下载前端 bundle、`--no-intel` 关闭被动情报、`--geo` 查 IP 地理位置、
 `--cve` 查版本 CVE 线索、`--proxy http://host:port` 指定出口（支持 socks5://）、`--proxy-from-system`
 强制走系统代理、`--direct` 禁止代理（含自动回退）、`--proxy-bypass "localhost,.corp"`；
 另有 `--no-verify` / `--verify-max N`（轻量验证）、`--no-dns`、`--no-graphql`、`--allow-external`、`--out`。
+需要登录态时：`--cookie "sid=…"`、`--bearer <token>`、`--header "X-Api-Key: …"`（可重复）；
+限速与退避：`--rate N`（每 host 每秒上限，默认 0=不限）、`--max-backoff S`（默认 8）。
 
 **出口（egress）**：默认 `auto` —— 先直连，只有连接级失败（超时/重置/拒绝）才用系统代理重试**一次**，
 并把结果写进 `meta.egress`（mode/type/host/source/fallback_used）。代理若返回 502/503/504，
 视为「代理到不了目标」而非「目标应答」，绝不拿错误页当报告。
+
+**会话注入**：`--cookie` / `--bearer` / `--header`（或 `RECONONE_COOKIE` / `RECONONE_BEARER` /
+`RECONONE_HEADERS`，换行分隔）会被加到**每一个**请求上，重定向后依然带上。凭据只以「形状」进报告：
+`meta.session` 记录头名称、Cookie 键名、是否携带 Bearer，**值永不写入任何产物**（进程参数可见，
+真 token 建议走环境变量）。注入了身份之后，401/403 才能按「已认证身份」解读。
+
+**速率与退避**：`--rate N` 按 **host 独立**计算间隔（A 站慢不拖累 B 站）；收到 429/503 时优先遵守
+`Retry-After`，否则指数退避 0.5s→1→2→4→8s 封顶，只推后**该 host 的下一次**请求。单次等待有上限
+（5s）、并受本次扫描的时间预算约束，避免被恶意 `Retry-After` 拖死。代价如实记账：`meta.rate`
+（waits / slept_s / throttled / hosts）。
 
 只要求 Python 3.9+ 与两个必需依赖（`httpx`、`anyio`）。首次运行先安装：
 
@@ -122,6 +134,7 @@ python -m reconone ui --host 0.0.0.0                       # 仅在你确知网�
 | **轻量验证** | 每个端点一次 `GET`（RoE：方法/上限/排除词 + 作用域守卫双检），可用标红、不可用标灰；被拦下的不发送但留 audit | `verification`、`endpoints[].verified`、`meta.roe` |
 | **TLS 证书** | 与请求走同一出口（直连 / CONNECT / SOCKS5），不再有隐藏直连 | `assets.tls.egress`、`assets.tls` |
 | **主动探测评分** | 只统计本次已经发出的请求：可达端点（`worth.live_surface`）、被拦截比例与 429 次数（`hard.active_blocking`）；不新增任何爆破/模糊测试 | `meta.probe_stats`、`profile.checks` |
+| **会话与限速** | 凭据按形状记录（头名/Cookie 键名/是否 Bearer，值不入盘）、每 host 独立限速、429/503 按 `Retry-After` 或指数退避 | `meta.session`、`meta.rate` |
 | **子域资产** | CT 子域进入 `assets.subdomains`，逐条标 `source` 与 `probed:false`（只证明签发过证书，不等于扫过） | `assets.subdomains` |
 | **依赖自检** | `python -m reconone doctor` 行为级验证 httpx/anyio/ssl/dns；每次扫描把版本写进报告 | `meta.deps`、CLI 退出码 4 |
 
@@ -190,11 +203,12 @@ runs/<domain>/
 
 ## 4. 验收标准
 
-完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。22 条验收项由测试断言。当前全仓 **177 tests OK**（`test_pipeline` 69 / `test_concurrency` 11 / `test_web` 16 / `test_intel` 19 / `test_triage` 11 / `test_doctor` 5 / `test_redaction` 20 / `test_egress` 16 / `test_verify` 10），`python -m unittest discover -s tests -t .` 可直接复现。
+完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。23 条验收项由测试断言。当前全仓 **209 tests OK**（`test_pipeline` 69 / `test_concurrency` 11 / `test_web` 17 / `test_intel` 19 / `test_triage` 11 / `test_doctor` 5 / `test_redaction` 20 / `test_egress` 16 / `test_verify` 10 / `test_session` 31），`python -m unittest discover -s tests -t .` 可直接复现。
 
 ## 5. 已知限制
 
-- **匿名视角**：不持有会话，登录后的功能面未测绘。这是设计边界，不是缺陷。
+- **单身份视角**：默认匿名；`--cookie/--bearer/--header` 可携带一个已授权身份，但不跟踪 `Set-Cookie`、
+  不做多账号对比、不自动登录，因此「越权/横向」类结论不在本工具范围。
 - **无渲染引擎**：不执行 JS，纯静态分析。SPA 的动态接口只能通过 bundle 字面量与 source map 获得。
 - **技术指纹**为规则匹配，会误报（例如同源 CDN 头）。
 - **GraphQL introspection** 属主动探测，可用 `--no-graphql` 关闭。
@@ -210,11 +224,12 @@ runs/<domain>/
 recon-one/
   reconone/    cli(编排) config http dns webprobe crawl jsanalyze apiprobe intel(被动情报)
                triage(画像) hypotheses(决策) score(评分) report(组装) brief(简报)
-               doctor(依赖自检) concurrency(并发) auth(凭据) web(控制台) util
+               verify(轻量验证) inject(会话注入) rate(限速退避) egress(出口)
+               redact(脱敏) doctor(依赖自检) concurrency(并发) auth(凭据) web(控制台) util
   rules/       technologies.json (47 条), secrets.json (17 条), score.json (权重与评级)
   tests/       fixture_server.py, test_pipeline.py, test_concurrency.py, test_web.py,
-               test_intel.py, test_triage.py, test_doctor.py
-               test_intel.py, test_triage.py, test_doctor.py, test_redaction.py
+               test_intel.py, test_triage.py, test_doctor.py, test_redaction.py,
+               test_egress.py, test_verify.py, test_session.py
   docs/        ARCHITECTURE.md, INTEL.md（被动/主动与画像算法）, ACCEPTANCE.md, SCORING.md,
                WEB-UI.md, RESEARCH.md, AUTHORIZED-USE.md 等
   SECURITY.md  仓库级授权声明 + 本工具漏洞报告渠道 + 五层脱敏范围

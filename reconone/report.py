@@ -345,6 +345,11 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
             # The rules this run played by, and what they stopped. Present even when the
             # verification stage is off, so "no verification" is recorded, not implied.
             "roe": (verification or {}).get("roe") or {},
+            # What the scan was allowed to carry and how fast it went. Names and counters only:
+            # the credentials themselves never reach the report.
+            "session": (session.injection.describe() if getattr(session, "injection", None)
+                        else {"enabled": False}),
+            "rate": (session.limiter.stats() if getattr(session, "limiter", None) else {}),
             # The premises this run rested on, recorded rather than assumed. `authorized_by`
             # is free text (ticket id, contract reference, pentest window) so an auditor can
             # tie the package to the paper that allowed it.
@@ -458,11 +463,13 @@ def _digest_view(report: dict) -> dict:
     view = {k: v for k, v in report.items() if k not in ("meta", "intel", "profile")}
     # `probe_stats` counts *our* requests and `deps` describes this machine: both are
     # properties of the run, not of the target, and both can differ by a few units between
-    # two scans of an unchanged site. They stay out of the digest so "same target, same
-    # digest" keeps meaning what it says.
+    # two scans of an unchanged site. `session`/`rate` describe what *we* carried and how
+    # fast we went, so they stay out too: "same target, same digest" keeps meaning what it
+    # says.
     view["meta"] = {kk: vv for kk, vv in report["meta"].items()
                     if kk not in ("generated_at", "started_at", "elapsed_seconds",
-                                  "probe_stats", "deps", "authorization", "egress")}
+                                  "probe_stats", "deps", "authorization", "egress",
+                                  "session", "rate")}
     # Who was authorised to look is not a property of the target: two operators scanning the
     # same site with different paperwork must digest the same. The notice version stays, so a
     # change in the wording of the notice is still visible in the digest.
@@ -594,6 +601,48 @@ def _verification_markdown(report: dict) -> list[str]:
     return lines
 
 
+def _session_markdown(report: dict) -> list[str]:
+    """Session injection and pacing: what shape we carried, never what value.
+
+    A report that shows `Authorization: Bearer eyJ…` is a leaked credential; one that shows
+    "bearer: true" is evidence. This section is the second form only, and it says explicitly
+    when nothing was injected, because that changes what "401/403" means.
+    """
+    meta = report.get("meta") or {}
+    sess = meta.get("session") or {}
+    rate = meta.get("rate") or {}
+    enabled = bool(sess.get("enabled"))
+    paced = float(rate.get("rate_per_s") or 0) > 0
+    throttled = int(rate.get("throttled") or 0)
+    if not (enabled or paced or throttled):
+        return []
+    lines = ["", "## 会话与速率（只记录形状，不记录值）", ""]
+    if enabled:
+        lines.append(f"- 注入头：{', '.join(sess.get('headers') or []) or '—'}"
+                     f"（来源 {sess.get('source') or 'cli'}）")
+        cookie_names = sess.get("cookie_names") or []
+        if cookie_names:
+            lines.append(f"- Cookie 名称：{', '.join(cookie_names)}（值不写入）")
+        if sess.get("bearer"):
+            lines.append("- 携带 Authorization: Bearer（令牌不写入）")
+        lines.append("- 429/401/403 因此可按“已认证身份”解读；越权与横向仍不在本工具范围")
+    else:
+        lines.append("- 未注入凭据：401/403 只能标红，“需要授权”与“不存在”不可区分")
+    if paced or throttled:
+        lines.append(f"- 速率：{rate.get('rate_per_s', 0)}/s per host"
+                     f"（间隔 {rate.get('interval_ms', 0)}ms）· 实际等待 {rate.get('waits', 0)} 次"
+                     f"/{rate.get('slept_s', 0)}s")
+        if throttled:
+            lines.append(f"- 429/503：{throttled} 次 · 最大退避 {rate.get('max_backoff_s', 0)}s"
+                         f"（Retry-After 优先，其次指数退避）")
+        hosts = rate.get("hosts") or {}
+        if len(hosts) > 1:
+            lines += ["", "| host | 请求 | 被限流 |", "|---|---:|---:|"]
+            lines += [f"| `{name}` | {st.get('requests', 0)} | {st.get('throttles', 0)} |"
+                      for name, st in hosts.items()]
+    lines.append("")
+    return lines
+
 def _profile_markdown(report: dict) -> list[str]:
     """Target profile: worth / hardness / opportunity window, with provenance per row."""
     prof = report.get("profile") or {}
@@ -690,6 +739,7 @@ def render_markdown(report: dict) -> str:
     lines += _score_markdown(report)
     lines += _profile_markdown(report)
     lines += _verification_markdown(report)
+    lines += _session_markdown(report)
     lines += ["", "## 技术栈", ""]
     lines += [f"- {tech['name']}（{', '.join(tech['evidence'])}）" for tech in report["assets"]["technology"]] or ["- 未识别"]
     lines += ["", "## 发现", "", "| ID | 级别 | 类别 | 标题 |", "|---|---|---|---|"]

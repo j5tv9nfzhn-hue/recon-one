@@ -58,9 +58,9 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 |---|---:|---:|---|
 | `util.py` | 334 | 8 | 哈希、密钥脱敏、**响应头/URL/证据片段脱敏**、URL 归一化、确定性 JSON、JS 美化、端点归一 |
 | `redact.py` | 111 | 1 | 第五层兜底脱敏：按形状扫描整份报告（Bearer/JWT/`token=`/凭据键名/任意 URL），并输出可机读的 `meta.redaction` |
-| `egress.py` | 296 | 2 | 出口策略：`--proxy`/系统代理（env + WinINET）/`--direct`/bypass、SOCKS5 握手（自实现，无额外依赖）、`meta.egress` |
+| `egress.py` | 322 | 2 | 出口策略：`--proxy`/系统代理（env + WinINET）/`--direct`/bypass、SOCKS5 握手（自实现，无额外依赖）、`meta.egress` |
 | `config.py` | 199 | 8 | 版本号、**授权声明常量**、三档扫描预算、输出根解析、规则加载（带缓存） |
-| `http.py` | 391 | 3 | 作用域守卫的 HTTP 客户端：代理三路由（直连/CONNECT/绝对 URI/SOCKS5）、TLS 证书探测同路由、失败分类、回退重试、预算与解压上限 |
+| `http.py` | 403 | 3 | 作用域守卫的 HTTP 客户端：代理四路由（直连/CONNECT/绝对 URI/SOCKS5）、TLS 证书探测同路由、**注入头合并 + 逐 host 限速/退避**、失败分类、回退重试、预算与解压上限 |
 | `dns.py` | 283 | 1 | 自实现 DNS 线格式（A/AAAA/CNAME/MX/NS/TXT/SOA），校验应答源与 txid，无 dnspython |
 | `concurrency.py` | 170 | 1 | 并发抓取（httpx + anyio，硬依赖）：同序返回、共享字节预算 |
 | `webprobe.py` | 269 | 1 | 首页抓取、安全头按值评分、Cookie 标志、技术指纹、well-known、CORS 实测 |
@@ -70,13 +70,15 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 | `intel.py` | 381 | 1 | 被动情报：唯一对外网络出口（可注入），CT 子域 / Wayback 存档 / geo / CVE 逐项 status；单次重试 + 分 provider 超时，永不抛 |
 | `triage.py` | 393 | 1 | 目标画像：10 项价值 + 9 项难度规则表（含两项主动实测）、覆盖率门槛、机会指数（非概率）、passive/active 与权重占比 |
 | `verify.py` | 184 | 2 | 轻量验证：每端点一次 GET（RoE 限定方法/上限/排除词），与作用域守卫双检；产出 usable/unusable/skipped + 逐条 audit |
+| `inject.py` | 130 | 2 | 会话注入：`--cookie/--bearer/--header` 与 `RECONONE_*` 合成不可变头表；`describe()` 只暴露头名与 Cookie 键名，值永不进报告 |
+| `rate.py` | 120 | 2 | 逐 host 限速与退避：`1/rate` 间隔、429/503 → `Retry-After` 或指数退避（0.5→8s 封顶）、单次等待上限、`stats()` 记账 |
 | `hypotheses.py` | 165 | 1 | 决策层：把事实转成带前置条件、验证步骤、成本与增益的假设 |
 | `score.py` | 782 | 2 | 证据门控评分：18 个原子检查、两轴、覆盖率门槛、triage 规则树 |
-| `report.py` | 846 | 1 | 报告组装、画像注入、子域资产、主动遥测、`meta.egress`/`meta.roe`、验证块、授权块与五层脱敏、Schema 校验、markdown/handoff 渲染 |
-| `brief.py` | 391 | 1 | AI 简报：授权行 + 画像摘要 + 验证结论 + 按决策价值排序、硬字符预算 |
+| `report.py` | 895 | 1 | 报告组装、画像注入、子域资产、主动遥测、`meta.egress`/`meta.roe`/`meta.session`/`meta.rate`、验证块、会话与速率摘要、授权块与五层脱敏、Schema 校验、markdown/handoff 渲染 |
+| `brief.py` | 404 | 1 | AI 简报：授权行 + 画像摘要 + 验证结论 + 会话/速率行 + 按决策价值排序、硬字符预算 |
 | `doctor.py` | 148 | 2 | 依赖自检：行为级验证 httpx 客户端、anyio TaskGroup+限流器、DNS 套接字、TLS 校验；不联网 |
-| `cli.py` | 570 | 2 | 参数解析（`--authorized-by` / `--proxy` 系列 / `--no-verify`）、出口解析、验证阶段、阶段编排、`doctor`、退出码 |
-| `web.py` | 729 | 2 | 控制台后端：静态资源 + JSON API（统一鉴权）、多目标并行批次（出口/验证透传）、产物管理、读时重算评分、`/api/compare` |
+| `cli.py` | 593 | 2 | 参数解析（`--authorized-by` / `--proxy` 系列 / `--no-verify` / `--cookie` / `--bearer` / `--header` / `--rate` / `--max-backoff`）、出口解析、会话装配、验证阶段、阶段编排、`doctor`、退出码 |
+| `web.py` | 734 | 2 | 控制台后端：静态资源 + JSON API（统一鉴权）、多目标并行批次（出口/验证/会话/速率透传）、产物管理、读时重算评分、`/api/compare` |
 | `auth.py` | 228 | 1 | 一次性配对令牌、PBKDF2 密码、30 天持久会话（哈希落盘）与失败限流 |
 
 `web.py` 与 `cli.py` 之间是**单向**依赖：控制台不含任何探测逻辑，所以命令行与浏览器产出**字节一致**的报告。
@@ -249,6 +251,30 @@ RoE（`verify.RoE`）是这一阶段的机器可读契约：作用域、允许�
 `Session.in_scope()`；被拦下的不发送，但会连同原因写进该端点的 `audit`，所以「没验证」和
 「验证失败」在报告里长得不一样。`meta.roe` 与 `report.verification.summary` 一起构成可追溯记录。
 控制台端点表按 `endpoints[].verified` 上色：可用=红（左侧强调线 + 文字），不可用=灰（整行降透明度）。
+
+
+### 4.11 会话注入与逐 host 限速（2026-11）
+
+没有身份的扫描只能看到登录墙：401/403 到底是「存在但需要授权」还是「根本不存在」，匿名视角
+无法区分。`inject.py` 把 `--cookie` / `--bearer` / `--header`（或 `RECONONE_*` 环境变量）合成一张
+**不可变**头表，`Session._attempt()` 里只有一处 `injection.apply(hdrs)`，所以新增的请求路径
+不可能忘记带上它，重定向后的每一跳也带着。
+
+凭据是唯一「必须发出、且绝不落盘」的数据，因此 `describe()` 是它进报告的唯一通道：只输出
+**头名称、Cookie 键名、是否携带 Bearer**（`meta.session`）。`Authorization: Bearer eyJ…` 出现在
+报告里就是一次泄漏；`{"bearer": true}` 才是证据。`tests/test_session.py` 会遍历整包产物，
+断言测试用的三个假凭据不出现在任何 `.json/.md/.txt` 里。
+
+`rate.py` 解决两个不同问题，共用一份状态：
+
+* **节流**：`--rate N` → 每 host `1/N` 秒间隔。状态按 host 键存，A 站忙不拖慢 B 站。
+* **退避**：429/503 是目标在提要求。优先遵守 `Retry-After`，否则 0.5s→1→2→4→8s 指数退避，
+  只推后**该 host 的下一次**请求；成功响应重置计数。单次等待有上限（5s）且受扫描时间预算约束，
+  防止恶意 `Retry-After: 86400` 把一次扫描拖死。
+
+代价不隐藏：`meta.rate` 记录 `rate_per_s / interval_ms / waits / slept_s / throttled / hosts`，
+`session.log[].wait_ms` 记到每个请求，报告 markdown 与 brief 各有一行摘要。`digest` 排除
+`session` 与 `rate`——「我们带了谁、跑多快」不是目标的属性，同一目标两次扫描必须得到同一 digest。
 
 ## 5. 产物结构
 

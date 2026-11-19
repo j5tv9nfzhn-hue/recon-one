@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from reconone import web                                  # noqa: E402
 from reconone.auth import Auth, AuthError                 # noqa: E402
+from tests import fixture_server                          # noqa: E402
 
 HEADERS = {"X-Recon-Request": "1", "Content-Type": "application/json"}
 
@@ -360,3 +361,54 @@ class TestParallelTargets(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+
+class TestConsoleSessionPassThrough(unittest.TestCase):
+    """The console body fields must reach the report, and the progress stream must still flow.
+
+    A batch was previously able to drop `on_event`/`cancel` while still returning a report; the
+    scan then finished silently with an empty stage log. Both are asserted here because both
+    are invisible in the report itself.
+    """
+
+    def test_cookie_bearer_rate_reach_the_report_and_events_flow(self):
+        fixture = fixture_server.start()
+        root = tempfile.mkdtemp()
+        srv = web.Server(("127.0.0.1", 0), root, "test")
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(shutil.rmtree, root, True)
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        self.addCleanup(fixture_server.stop, fixture)
+        token = srv.auth.issue_token()
+        status, _, headers = _post(base + "/api/claim",
+                                   {"token": token, "password": "CorrectHorse9x"})
+        self.assertEqual(status, 200)
+        cookie = headers.get("Set-Cookie").split(";")[0]
+        target = f"127.0.0.1:{fixture_server.PORT_HOLDER['port']}"
+        status, body, _ = _post(base + "/api/scan", {
+            "targets": [target], "profile": "fast", "use_js": False, "use_intel": False,
+            "verify": False, "direct": True, "rate": 50,
+            "cookie": "sid=WEBSECRET; role=ops", "bearer": "WEBBEARER",
+            "headers": ["X-Api-Key: WEBKEY"],
+        }, {"Cookie": cookie})
+        self.assertEqual(status, 200, body)
+
+        deadline = time.time() + 120
+        while time.time() < deadline and srv.job.state == "running":
+            time.sleep(0.2)
+        self.assertEqual(srv.job.state, "done", srv.job.events[-3:])
+        self.assertTrue(srv.job.events, "进度事件流不能为空（on_event 被丢掉时会静默失败）")
+
+        out_dir = srv.job.targets[0]["out_dir"]
+        with open(os.path.join(out_dir, "report", "report.json"), encoding="utf-8") as fh:
+            report = json.load(fh)
+        sess = report["meta"]["session"]
+        self.assertEqual(sess["source"], "web")
+        self.assertEqual(sess["cookie_names"], ["sid", "role"])
+        self.assertTrue(sess["bearer"])
+        self.assertIn("X-Api-Key", sess["headers"])
+        self.assertEqual(report["meta"]["rate"]["rate_per_s"], 50.0)
+        self.assertGreater(report["meta"]["rate"]["waits"], 0)
+        self.assertEqual(report["assets"]["http"]["status"], 200, "必须真的打到目标")
