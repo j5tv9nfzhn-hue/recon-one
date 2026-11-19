@@ -51,6 +51,11 @@ python -m reconone scan --domain example.com --authorized-by "CHG-2026-0417 / �
 `meta.redaction.sent_credentials.registered` 记录登记了几个值、`masked` 表明已执行；
 `meta.session` 只写头名称与 Cookie 键名，**值本身不出现在 `report/` 的任何文件里**。
 
+同一规则适用于**站点自己下发的** cookie：`meta.session.cookies` 只写
+`enabled / received / stored / rejected / live / carried_requests / names`，值只在内存里存活一次
+扫描，既不进 `report/`，也不写任何缓存文件。`Domain` 只接受目标本身或其子域——`.com` 这类超域
+声明会被拒收并计入 `rejected`，避免一次响应把会话 cookie 装进整个 TLD。
+
 **例外（有意为之）**：`raw/js/`、`raw/maps/` 保留原始字节，用于复核某条结论。它们
 ① 只在本地 `runs/` 下生成，② 被 `.gitignore` 排除，③ 在 `manifest.json` 里单独列出。
 需要对外交付报告时，请只交付 `report/` 目录，或先删除 `raw/`。

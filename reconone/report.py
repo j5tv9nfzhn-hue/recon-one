@@ -347,8 +347,7 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
             "roe": (verification or {}).get("roe") or {},
             # What the scan was allowed to carry and how fast it went. Names and counters only:
             # the credentials themselves never reach the report.
-            "session": (session.injection.describe() if getattr(session, "injection", None)
-                        else {"enabled": False}),
+            "session": _session_view(session),
             "rate": (session.limiter.stats() if getattr(session, "limiter", None) else {}),
             # The premises this run rested on, recorded rather than assumed. `authorized_by`
             # is free text (ticket id, contract reference, pentest window) so an auditor can
@@ -604,6 +603,21 @@ def _verification_markdown(report: dict) -> list[str]:
     return lines
 
 
+def _session_view(session) -> dict:
+    """`meta.session`: what we carried, as shapes and counters.
+
+    Two sources, one block: the injection (names only) and the cookie jar (names and counts
+    only). Neither ever contributes a value — that is the whole reason `describe()` and
+    `stats()` exist instead of dumping the objects.
+    """
+    injection = getattr(session, "injection", None)
+    view = dict(injection.describe()) if injection is not None else {"enabled": False}
+    jar = getattr(session, "cookies", None)
+    if jar is not None:
+        view["cookies"] = jar.stats()
+    return view
+
+
 def _session_markdown(report: dict) -> list[str]:
     """Session injection and pacing: what shape we carried, never what value.
 
@@ -617,7 +631,10 @@ def _session_markdown(report: dict) -> list[str]:
     enabled = bool(sess.get("enabled"))
     paced = float(rate.get("rate_per_s") or 0) > 0
     throttled = int(rate.get("throttled") or 0)
-    if not (enabled or paced or throttled):
+    jar = sess.get("cookies") or {}
+    jar_active = bool(jar.get("enabled")
+                      and (int(jar.get("received") or 0) or int(jar.get("carried_requests") or 0)))
+    if not (enabled or paced or throttled or jar_active):
         return []
     lines = ["", "## 会话与速率（只记录形状，不记录值）", ""]
     if enabled:
@@ -639,6 +656,13 @@ def _session_markdown(report: dict) -> list[str]:
         lines.append("- 429/401/403 因此可按“已认证身份”解读；越权与横向仍不在本工具范围")
     else:
         lines.append("- 未注入凭据：401/403 只能标红，“需要授权”与“不存在”不可区分")
+    if jar_active:
+        lines.append(f"- Set-Cookie 会话保持：收到 {jar.get('received', 0)} 个 / 接受 "
+                     f"{jar.get('stored', 0)} 个 / 带在 {jar.get('carried_requests', 0)} 次请求上"
+                     f"（当前存活 {jar.get('live', 0)} 个；越域或超范围拒收 "
+                     f"{jar.get('rejected', 0)} 个）")
+        if jar.get("names"):
+            lines.append(f"- 站点下发的 Cookie 名称：{', '.join(jar['names'])}（值不记录）")
     if paced or throttled:
         lines.append(f"- 速率：{rate.get('rate_per_s', 0)}/s per host"
                      f"（间隔 {rate.get('interval_ms', 0)}ms）· 实际等待 {rate.get('waits', 0)} 次"

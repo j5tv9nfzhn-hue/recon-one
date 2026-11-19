@@ -60,7 +60,7 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 | `redact.py` | 181 | 1 | 第五层兜底脱敏：按**形状**（Bearer/JWT/`token=`/凭据键名/任意 URL）与**本次发出的凭据值**（`[redacted:sent-credential]`，覆盖目标回显）扫描整份报告，并输出可机读的 `meta.redaction` |
 | `egress.py` | 322 | 2 | 出口策略：`--proxy`/系统代理（env + WinINET）/`--direct`/bypass、SOCKS5 握手（自实现，无额外依赖）、`meta.egress` |
 | `config.py` | 199 | 8 | 版本号、**授权声明常量**、三档扫描预算、输出根解析、规则加载（带缓存） |
-| `http.py` | 403 | 3 | 作用域守卫的 HTTP 客户端：代理四路由（直连/CONNECT/绝对 URI/SOCKS5）、TLS 证书探测同路由、**注入头合并 + 逐 host 限速/退避**、失败分类、回退重试、预算与解压上限 |
+| `http.py` | 442 | 3 | 作用域守卫的 HTTP 客户端：代理四路由（直连/CONNECT/绝对 URI/SOCKS5）、TLS 证书探测同路由、**注入头合并 + cookie 合成 + 逐 host 限速/退避**、失败分类、回退重试、预算与解压上限 |
 | `dns.py` | 283 | 1 | 自实现 DNS 线格式（A/AAAA/CNAME/MX/NS/TXT/SOA），校验应答源与 txid，无 dnspython |
 | `concurrency.py` | 170 | 1 | 并发抓取（httpx + anyio，硬依赖）：同序返回、共享字节预算 |
 | `webprobe.py` | 269 | 1 | 首页抓取、安全头按值评分、Cookie 标志、技术指纹、well-known、CORS 实测 |
@@ -72,13 +72,14 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 | `verify.py` | 184 | 2 | 轻量验证：每端点一次 GET（RoE 限定方法/上限/排除词），与作用域守卫双检；产出 usable/unusable/skipped + 逐条 audit |
 | `inject.py` | 177 | 2 | 会话注入：`--cookie/--bearer/--header` 与 `RECONONE_*` 合成不可变头表；`describe()` 只暴露头名与 Cookie 键名（无键片段只计数），`secrets()` 仅供脱敏层按值遮蔽，值永不进报告 |
 | `rate.py` | 120 | 2 | 逐 host 限速与退避：`1/rate` 间隔、429/503 → `Retry-After` 或指数退避（0.5→8s 封顶）、单次等待上限、`stats()` 记账 |
+| `cookiejar.py` | 251 | 2 | Set-Cookie 会话保持（RFC 6265 实用子集）：`Domain`/`Path` 作用域、`Secure` 双向校验、`Max-Age`/`Expires`/删除、上限淘汰；**只接受目标或其子域的 Domain**，`stats()` 只给名称与计数 |
 | `hypotheses.py` | 165 | 1 | 决策层：把事实转成带前置条件、验证步骤、成本与增益的假设 |
 | `score.py` | 782 | 2 | 证据门控评分：18 个原子检查、两轴、覆盖率门槛、triage 规则树 |
-| `report.py` | 907 | 1 | 报告组装、画像注入、子域资产、主动遥测、`meta.egress`/`meta.roe`/`meta.session`/`meta.rate`、验证块、会话与速率摘要、授权块与五层脱敏（含发出凭据的值级遮蔽）、Schema 校验、markdown/handoff 渲染 |
+| `report.py` | 931 | 1 | 报告组装、画像注入、子域资产、主动遥测、`meta.egress`/`meta.roe`/`meta.session`（含 `cookies`）/`meta.rate`、验证块、会话与速率摘要、授权块与五层脱敏（含发出凭据的值级遮蔽）、Schema 校验、markdown/handoff 渲染 |
 | `brief.py` | 404 | 1 | AI 简报：授权行 + 画像摘要 + 验证结论 + 会话/速率行 + 按决策价值排序、硬字符预算 |
 | `doctor.py` | 148 | 2 | 依赖自检：行为级验证 httpx 客户端、anyio TaskGroup+限流器、DNS 套接字、TLS 校验；不联网 |
-| `cli.py` | 593 | 2 | 参数解析（`--authorized-by` / `--proxy` 系列 / `--no-verify` / `--cookie` / `--bearer` / `--header` / `--rate` / `--max-backoff`）、出口解析、会话装配、验证阶段、阶段编排、`doctor`、退出码 |
-| `web.py` | 734 | 2 | 控制台后端：静态资源 + JSON API（统一鉴权）、多目标并行批次（出口/验证/会话/速率透传）、产物管理、读时重算评分、`/api/compare` |
+| `cli.py` | 602 | 2 | 参数解析（`--authorized-by` / `--proxy` 系列 / `--no-verify` / `--cookie` / `--bearer` / `--header` / `--rate` / `--max-backoff` / `--no-cookies`）、出口解析、会话装配（注入 + jar）、验证阶段、阶段编排、`doctor`、退出码 |
+| `web.py` | 738 | 2 | 控制台后端：静态资源 + JSON API（统一鉴权）、多目标并行批次（出口/验证/会话/速率/`use_cookies` 透传）、产物管理、读时重算评分、`/api/compare` |
 | `auth.py` | 228 | 1 | 一次性配对令牌、PBKDF2 密码、30 天持久会话（哈希落盘）与失败限流 |
 
 `web.py` 与 `cli.py` 之间是**单向**依赖：控制台不含任何探测逻辑，所以命令行与浏览器产出**字节一致**的报告。
@@ -286,6 +287,29 @@ Cookie/Bearer/ApiKey 的靶站跑完整扫描，先断言服务端确实收到�
 代价不隐藏：`meta.rate` 记录 `rate_per_s / interval_ms / waits / slept_s / throttled / hosts`，
 `session.log[].wait_ms` 记到每个请求，报告 markdown 与 brief 各有一行摘要。`digest` 排除
 `session` 与 `rate`——「我们带了谁、跑多快」不是目标的属性，同一目标两次扫描必须得到同一 digest。
+
+### 4.12 Set-Cookie 会话保持（2026-11）
+
+`--cookie` 只能给一个静态身份。真实站点在第一个响应下发会话 cookie，后续每个请求都要带回去；
+不带，爬进登录后的区域只会看到登录墙，报告于是把「有内容」写成「401 不可用」——结论错了，
+而且错在**低估**目标。
+
+`cookiejar.CookieJar` 是 RFC 6265 的实用子集：`Domain`/`Path` 作用域、`Secure`（只由 TLS 响应设置、
+只走 TLS 发回）、`Max-Age`/`Expires`、`Max-Age=0` 删除、上限淘汰（dropped oldest，保持确定性）。
+与 `--cookie` 的合并只在一处：`Session._cookie_header()`，**运维显式给的名字优先**——一次扫描里
+出现两个身份而不声明，比不带身份更糟。
+
+关键取舍是 `Domain` 的接受规则。没有 public suffix list 就无法证明 `.com` 是公共后缀，所以规则
+反过来写：**`Domain` 只能是目标本身或它的子域**，其余一律拒收并计数。代价是某些「友邻域共享
+cookie」的站点我们不发（会少一些发现），收益是绝不会把目标的会话交给一个未授权的主机——
+宁可少测，也不当 confused deputy。
+
+`meta.session.cookies` 记录 `enabled / received / stored / rejected / live / carried_requests / names`。
+值只活在内存里：`tests/test_cookies.py::TestReportedWithoutValues` 跑完整扫描后遍历整包文件，
+断言没有任何一个 cookie 值出现在磁盘上。
+
+已知边界：不实现 `SameSite`（我们不是跨站上下文）、不做 cookie 前缀（`__Host-`/`__Secure-`）校验、
+不持久化 jar 到磁盘（跨进程复用需要显式重新登录）。
 
 ## 5. 产物结构
 

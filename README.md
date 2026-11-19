@@ -36,7 +36,7 @@ cd recon-one
 python -m reconone doctor                     # 先确认 httpx/anyio/ssl/dns 真的能用（1 秒，不联网）
 python -m reconone ui                         # 启动 Web 控制台（前后端同一进程）
 python -m reconone scan --domain example.com --profile default   # 纯命令行
-python -m unittest discover -s tests -t .     # 220 项测试（全部本地、不联网）
+python -m unittest discover -s tests -t .     # 243 项测试（全部本地、不联网）
 ```
 
 常用开关（`scan`）：`--no-js` 不下载前端 bundle、`--no-intel` 关闭被动情报、`--geo` 查 IP 地理位置、
@@ -44,7 +44,8 @@ python -m unittest discover -s tests -t .     # 220 项测试（全部本地、�
 强制走系统代理、`--direct` 禁止代理（含自动回退）、`--proxy-bypass "localhost,.corp"`；
 另有 `--no-verify` / `--verify-max N`（轻量验证）、`--no-dns`、`--no-graphql`、`--allow-external`、`--out`。
 需要登录态时：`--cookie "sid=…"`、`--bearer <token>`、`--header "X-Api-Key: …"`（可重复）；
-限速与退避：`--rate N`（每 host 每秒上限，默认 0=不限）、`--max-backoff S`（默认 8）。
+`--no-cookies` 关闭 Set-Cookie 会话保持；限速与退避：`--rate N`（每 host 每秒上限，默认 0=不限）、
+`--max-backoff S`（默认 8）。
 
 **出口（egress）**：默认 `auto` —— 先直连，只有连接级失败（超时/重置/拒绝）才用系统代理重试**一次**，
 并把结果写进 `meta.egress`（mode/type/host/source/fallback_used）。代理若返回 502/503/504，
@@ -59,6 +60,13 @@ python -m unittest discover -s tests -t .     # 220 项测试（全部本地、�
 是凭据，所以第五层脱敏另有一道**按值**的遮蔽——本次实际发出的凭据值（长度 ≥6）在整份报告里被替换为
 `[redacted:sent-credential]`，`meta.redaction.sent_credentials` 记录登记了几个值。`raw/` 保留原文用于
 复核，交付时只给 `report/`（见 [SECURITY.md](SECURITY.md)）。
+
+**Set-Cookie 会话保持**：站点在第一页下发的会话 cookie 会被记住并带回后续请求（否则爬进登录后的
+区域只会看到登录墙）。规则按 RFC 6265 的实用子集：`Domain`/`Path` 限定作用域、`Secure` 只走 TLS
+且只由 TLS 响应设置、`Max-Age`/`Expires` 到期即失效、`Max-Age=0` 视为删除。**`Domain` 只能指向
+目标本身或其子域**——`Domain=.com` 这类超域声明直接拒收并计入 `meta.session.cookies.rejected`，
+避免一次响应把会话 cookie 装进整个 TLD。`--no-cookies` 整体关闭；`meta.session.cookies` 只记
+计数与 cookie 名称，值不落盘。
 
 **速率与退避**：`--rate N` 按 **host 独立**计算间隔（A 站慢不拖累 B 站）；收到 429/503 时优先遵守
 `Retry-After`，否则指数退避 0.5s→1→2→4→8s 封顶，只推后**该 host 的下一次**请求。单次等待有上限
@@ -140,6 +148,7 @@ python -m reconone ui --host 0.0.0.0                       # 仅在你确知网�
 | **TLS 证书** | 与请求走同一出口（直连 / CONNECT / SOCKS5），不再有隐藏直连 | `assets.tls.egress`、`assets.tls` |
 | **主动探测评分** | 只统计本次已经发出的请求：可达端点（`worth.live_surface`）、被拦截比例与 429 次数（`hard.active_blocking`）；不新增任何爆破/模糊测试 | `meta.probe_stats`、`profile.checks` |
 | **会话与限速** | 凭据按形状记录（头名/Cookie 键名/是否 Bearer，值不入盘）、每 host 独立限速、429/503 按 `Retry-After` 或指数退避 | `meta.session`、`meta.rate` |
+| **Set-Cookie 会话保持** | 记住站点下发的会话 cookie 并带回后续请求；`Domain` 只接受目标或其子域（`.com` 直接拒收）、`Secure` 双向校验、`Max-Age`/`Expires` 与删除语义 | `meta.session.cookies` |
 | **子域资产** | CT 子域进入 `assets.subdomains`，逐条标 `source` 与 `probed:false`（只证明签发过证书，不等于扫过） | `assets.subdomains` |
 | **依赖自检** | `python -m reconone doctor` 行为级验证 httpx/anyio/ssl/dns；每次扫描把版本写进报告 | `meta.deps`、CLI 退出码 4 |
 
@@ -208,12 +217,14 @@ runs/<domain>/
 
 ## 4. 验收标准
 
-完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。23 条验收项由测试断言。当前全仓 **220 tests OK**（`test_pipeline` 69 / `test_concurrency` 11 / `test_web` 17 / `test_intel` 19 / `test_triage` 11 / `test_doctor` 5 / `test_redaction` 28 / `test_egress` 16 / `test_verify` 10 / `test_session` 34），`python -m unittest discover -s tests -t .` 可直接复现。
+完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。24 条验收项由测试断言。当前全仓 **243 tests OK**（`test_pipeline` 69 / `test_concurrency` 11 / `test_web` 17 / `test_intel` 19 / `test_triage` 11 / `test_doctor` 5 / `test_redaction` 28 / `test_egress` 16 / `test_verify` 10 / `test_session` 34 / `test_cookies` 23），`python -m unittest discover -s tests -t .` 可直接复现。
 
 ## 5. 已知限制
 
-- **单身份视角**：默认匿名；`--cookie/--bearer/--header` 可携带一个已授权身份，但不跟踪 `Set-Cookie`、
-  不做多账号对比、不自动登录，因此「越权/横向」类结论不在本工具范围。
+- **单身份视角**：默认匿名；`--cookie/--bearer/--header` 可携带一个已授权身份，Set-Cookie 会自动
+  续用同一个会话，但不做多账号对比、不自动登录、不猜口令，因此「越权/横向」类结论不在本工具范围。
+- **cookie 规则是子集**：不实现 `SameSite`（我们不是跨站上下文）、不做 public suffix 推断，
+  所以 `Domain` 只接受目标本身或它的子域，宁可拒收也不当 confused deputy。
 - **`report/` 不含凭据，`raw/` 例外**：`report.*` 里连回显的凭据都被遮掉，但 `raw/js`、`raw/maps`
   保留原始字节用于复核（见 [SECURITY.md](SECURITY.md)）；交付时只给 `report/`，或先删 `raw/`。
 - **无渲染引擎**：不执行 JS，纯静态分析。SPA 的动态接口只能通过 bundle 字面量与 source map 获得。
@@ -231,12 +242,12 @@ runs/<domain>/
 recon-one/
   reconone/    cli(编排) config http dns webprobe crawl jsanalyze apiprobe intel(被动情报)
                triage(画像) hypotheses(决策) score(评分) report(组装) brief(简报)
-               verify(轻量验证) inject(会话注入) rate(限速退避) egress(出口)
+               verify(轻量验证) inject(会话注入) cookiejar(Set-Cookie) rate(限速退避) egress(出口)
                redact(脱敏) doctor(依赖自检) concurrency(并发) auth(凭据) web(控制台) util
   rules/       technologies.json (47 条), secrets.json (17 条), score.json (权重与评级)
   tests/       fixture_server.py, test_pipeline.py, test_concurrency.py, test_web.py,
                test_intel.py, test_triage.py, test_doctor.py, test_redaction.py,
-               test_egress.py, test_verify.py, test_session.py
+               test_egress.py, test_verify.py, test_session.py, test_cookies.py
   docs/        ARCHITECTURE.md, INTEL.md（被动/主动与画像算法）, ACCEPTANCE.md, SCORING.md,
                WEB-UI.md, RESEARCH.md, AUTHORIZED-USE.md 等
   SECURITY.md  仓库级授权声明 + 本工具漏洞报告渠道 + 五层脱敏范围

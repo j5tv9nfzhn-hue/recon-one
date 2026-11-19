@@ -13,11 +13,12 @@ from urllib.parse import urlsplit
 from . import apiprobe, crawl as crawler, dns as dnsmod, egress as egressmod, hypotheses
 from . import jsanalyze, report as reportmod
 from . import brief as briefmod
+from . import cookiejar as cookiejarmod
 from . import doctor as doctormod
-from . import intel as intelmod
-from . import verify as verifymod
 from . import inject as injectmod
+from . import intel as intelmod
 from . import rate as ratemod
+from . import verify as verifymod
 from . import webprobe
 from .config import (AUTHORIZED_USE, AUTHORIZED_USE_SHORT, PROFILES, RESERVED_RUN_NAMES,
                      VERSION, ensure_out_dir, find_existing_run, profile as load_profile,
@@ -126,7 +127,8 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
              egress=None, use_verify: bool = True,
              verify_max: int = verifymod.DEFAULT_MAX_REQUESTS,
              cookie: str = "", bearer: str = "", headers=(), rate: float = 0.0,
-             max_backoff: float = 8.0, injection_source: str = "cli") -> tuple[dict, int]:
+             max_backoff: float = 8.0, injection_source: str = "cli",
+             use_cookies: bool = True) -> tuple[dict, int]:
     """Run every probe once. `on_event` receives stage dicts; `cancel` is polled between stages.
 
     `use_js=False` skips bundle download + JS analysis entirely: endpoints then come from
@@ -151,10 +153,14 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
     injection = (injectmod.build(cookie, bearer, headers, source=injection_source)
                  if (cookie or bearer or headers) else injectmod.from_env())
     limiter = ratemod.Limiter(rate, max_backoff=max_backoff)
+    # Set-Cookie persistence is on by default: a site that hands out a session cookie on the
+    # first page expects it back on the second, and without that every later page is
+    # anonymous (the crawl would report the login wall instead of what is behind it).
+    cookies = cookiejarmod.CookieJar(enabled=use_cookies, scope_domain=domain)
     session = Session(
         domain, timeout=limits["timeout"], max_total_bytes=limits["max_total_bytes"],
         allow_external=allow_external, verify_tls=verify_tls, budget_seconds=limits["budget_seconds"],
-        egress=egress, injection=injection, limiter=limiter,
+        egress=egress, injection=injection, limiter=limiter, cookies=cookies,
     )
 
     # `cancel` may be a callable predicate (older callers) or a threading.Event (the web
@@ -434,6 +440,7 @@ def cmd_scan(args) -> int:
                             rate=getattr(args, "rate", 0.0),
                             max_backoff=getattr(args, "max_backoff", 8.0),
                             use_verify=not getattr(args, "no_verify", False),
+                            use_cookies=not getattr(args, "no_cookies", False),
                             verify_max=getattr(args, "verify_max", verifymod.DEFAULT_MAX_REQUESTS))
     if args.json:
         print(json.dumps({"exit_code": code, "counts": report["coverage"]["counts"],
@@ -548,6 +555,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="max requests per second per host (0 = unlimited)")
     scan.add_argument("--max-backoff", type=float, default=8.0, metavar="S",
                       help="cap for the per-host throttle backoff in seconds")
+    scan.add_argument("--no-cookies", action="store_true",
+                      help="do not persist Set-Cookie: every request goes out without the jar")
     scan.add_argument("--geo", action="store_true",
                       help="look up the resolved IP's location via ip-api.com (sends the IP to a third party)")
     scan.add_argument("--cve", action="store_true",

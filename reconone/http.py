@@ -9,6 +9,7 @@ import time
 import zlib
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
+from . import cookiejar as cookiejarmod
 from . import egress as egressmod
 from . import inject as injectmod
 from . import rate as ratemod
@@ -94,7 +95,7 @@ class Session:
                  allow_external: bool = False, max_body: int = 4_000_000,
                  verify_tls: bool = True, user_agent: str = DEFAULT_UA,
                  budget_seconds: float | None = None, egress=None,
-                 injection=None, limiter=None):
+                 injection=None, limiter=None, cookies=None):
         self.domain = domain.lower()
         self.timeout = timeout
         self.max_total_bytes = max_total_bytes
@@ -124,6 +125,9 @@ class Session:
         # keep today's behaviour byte for byte.
         self.injection = injection if injection is not None else injectmod.Injection()
         self.limiter = limiter if limiter is not None else ratemod.Limiter()
+        # Set-Cookie persistence. A caller that does not pass a jar gets a disabled one, so
+        # `Session(domain)` keeps behaving exactly like a scanner with no cookie support.
+        self.cookies = cookies if cookies is not None else cookiejarmod.CookieJar(enabled=False)
 
     # -- scope -----------------------------------------------------------------
     def in_scope(self, url: str) -> bool:
@@ -240,6 +244,29 @@ class Session:
         return (http.client.HTTPConnection(proxy.host, proxy.port, timeout=self.timeout),
                 absolute + path_query, proxy.basic_header())
 
+    def _cookie_header(self, host: str, path: str, secure: bool, hdrs: dict) -> str:
+        """Merge the injected cookie with the jar's, injected names winning.
+
+        An operator who passed `--cookie "sid=..."` is asserting an identity; a `Set-Cookie`
+        for the same name must not silently replace it mid-scan, or the report would mix two
+        identities without saying so. Everything else is additive.
+        """
+        injected = ""
+        for name, value in hdrs.items():
+            if name.lower() == "cookie":
+                injected = str(value or "")
+                break
+        from_jar = self.cookies.header_for(host, path, secure)
+        if not from_jar:
+            return injected
+        if not injected:
+            return from_jar
+        taken = {part.split("=", 1)[0].strip().lower()
+                 for part in injected.split(";") if "=" in part}
+        extra = [part.strip() for part in from_jar.split(";")
+                 if part.split("=", 1)[0].strip().lower() not in taken]
+        return "; ".join([injected] + extra) if extra else injected
+
     def _attempt(self, url: str, method: str, data: bytes | None, headers: dict | None,
                  max_bytes: int | None, proxy) -> Response:
         parts = urlsplit(url)
@@ -264,6 +291,13 @@ class Session:
             if extra:
                 hdrs.update(extra)
             hdrs = self.injection.apply(hdrs)
+            # One `Cookie` header, assembled once: injected pairs (the operator's identity) and
+            # the jar (what the site handed us). Anything the caller passed in is dropped so a
+            # duplicate header can never be sent.
+            cookie_header = self._cookie_header(host, parts.path or "/", scheme == "https", hdrs)
+            hdrs = {name: value for name, value in hdrs.items() if name.lower() != "cookie"}
+            if cookie_header:
+                hdrs["Cookie"] = cookie_header
             conn.request(method, target, body=data, headers=hdrs)
             raw = conn.getresponse()
             self.limiter.after(host, raw.status,
@@ -290,6 +324,11 @@ class Session:
             # which silently dropped every Set-Cookie but one.
             header_list = list(raw.getheaders())
             resp_headers = {k.lower(): v for k, v in header_list}
+            # Absorb `Set-Cookie` before the response leaves this function: the next page in
+            # the crawl is already authenticated, which is the whole point of the jar.
+            self.cookies.store(host, parts.path or "/", scheme == "https",
+                               [value for name, value in header_list
+                                if name.lower() == "set-cookie"])
             elapsed = int((time.time() - started) * 1000)
             self.requests += 1
             self.bytes_total += len(body)

@@ -1,14 +1,14 @@
 # 验收标准
 
-23 条验收项由 `tests/test_pipeline.py`（AC1–AC15）、`tests/test_triage.py`（AC16–AC17）、`tests/test_doctor.py`（AC18）、`tests/test_web.py`（AC19）、`tests/test_redaction.py`（AC20）、`tests/test_egress.py`（AC21）、`tests/test_verify.py`（AC22）与 `tests/test_session.py`（AC23）自动断言；运行：
+24 条验收项由 `tests/test_pipeline.py`（AC1–AC15）、`tests/test_triage.py`（AC16–AC17）、`tests/test_doctor.py`（AC18）、`tests/test_web.py`（AC19）、`tests/test_redaction.py`（AC20）、`tests/test_egress.py`（AC21）、`tests/test_verify.py`（AC22）、`tests/test_session.py`（AC23）与 `tests/test_cookies.py`（AC24）自动断言；运行：
 
 ```powershell
 python -m unittest discover -s tests -t .
 ```
 
-当前结果：**220 tests OK**（`test_pipeline.py` 69 / `test_concurrency.py` 11 / `test_web.py` 17 /
+当前结果：**243 tests OK**（`test_pipeline.py` 69 / `test_concurrency.py` 11 / `test_web.py` 17 /
 `test_intel.py` 19 / `test_triage.py` 11 / `test_doctor.py` 5 / `test_redaction.py` 28 /
-`test_egress.py` 16 / `test_verify.py` 10 / `test_session.py` 34），全部走本地靶站或纯函数，不访问公网。
+`test_egress.py` 16 / `test_verify.py` 10 / `test_session.py` 34 / `test_cookies.py` 23），全部走本地靶站或纯函数，不访问公网。
 
 ## 验收矩阵
 
@@ -37,6 +37,7 @@ python -m unittest discover -s tests -t .
 | AC21 | 出口（E1–E4）：`--proxy` 后所有请求经代理、目标零直连；系统代理从 env/WinINET 发现且 PAC 显式标注不支持；SOCKS5 可用；失败分类为 `connect-timeout/reset/refused/tls`，只有连接级失败回退一次，代理 5xx 记为 `proxy-error` 而不当页面 | `test_egress.py::TestProxyEgress` / `TestSystemProxy` / `TestSocks5` / `TestFailureClassification` |
 | AC22 | 轻量验证：每端点一次 GET，可用（2xx/3xx/401/403/405/429）标红、404/410 与连接失败标灰；RoE 限定方法与上限、破坏性路径不发送、越界请求被作用域守卫拦下且记录；`meta.roe` + `verification.summary` 可追溯；TLS 证书探测与请求走同一出口 | `test_verify.py`（10 项）/ `test_pipeline.py::FixtureScan::test_verification_stage_is_bound_and_recorded` |
 | AC23 | 会话注入与限速：Cookie/Bearer/自定义头到达服务端且重定向后仍携带；`meta.session` 只含头名与 Cookie 键名（**无键名的裸 Cookie 片段只计数**），`describe()`/`secrets()` 都不写出值，整包产物里搜不到任何凭据；`--rate N` 按 host 独立限速（`wait_ms` 逐请求记账），429/503 按 `Retry-After` 或指数退避（0.5→8s 封顶）推后该 host 的下一次请求，成功即重置；单次等待有上限且受预算约束 | `test_session.py`（34 项）/ `test_web.py::TestConsoleSessionPassThrough` |
+| AC24 | Set-Cookie 会话保持：`Domain`/`Path`/`Secure`/`Max-Age` 按 RFC 6265 子集收发，`Max-Age=0` 即删除；**`Domain` 只接受目标或其子域**（`.com` 拒收并计数）；`--cookie` 的同名值优先于 jar；第二跳请求自动带上第一跳拿到的会话（`/app` 由 401 变 200）；`meta.session.cookies` 只记计数与名称，整包文件搜不到任何 cookie 值；`--no-cookies` 关闭 | `test_cookies.py`（23 项） |
 
 > AC13 的「必备小节」由测试断言为 3 个（已确认事实 / 未覆盖项 / 建议动作）；`handoff.md` 实际含 5 节，
 > 停机条件在第 4 节。文档与断言以**测试**为准。
@@ -68,6 +69,11 @@ Wayback 路径与敏感路径识别、geo/CVE 默认关闭与显式开启、站�
 短值（`admin`/`acme`）不登记以免毁掉报告事实，重复清洗结果不变；端到端用例跑一个**故意回显**
 Cookie/Bearer/ApiKey 的靶站，先证明服务端确实收到了（否则会假通过），再断言整包
 `.json/.md/.txt/.html` 里搜不到任何一个值。
+`test_cookies.py` 覆盖会话保持的三层：jar 规则（`Domain`/`Path`/`Secure`/过期/删除/上限、
+`.com` 与跨域声明拒收、IP 目标不接受 `Domain` 属性、头部顺序稳定、`stats()` 不含值）、
+接线（第二跳自动带 cookie、`--cookie` 同名值优先、只发一个 `Cookie` 头、jar 关闭后不发），
+以及端到端（只对持 cookie 者开放的 `/app/inner` 必须 200、`meta.session.cookies` 只有名称与计数、
+整包文件无 cookie 值、markdown 写明会话保持、`use_cookies=False` 时不存不发）。
 
 ## 端到端冒烟（非自动，人工执行）
 

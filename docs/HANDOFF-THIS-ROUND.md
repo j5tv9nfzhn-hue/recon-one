@@ -114,7 +114,8 @@ recon-one/
 | `tests/test_egress.py` | 16 | E1 代理全量转发（目标零直连、绝对 URI、CONNECT）、E2 系统代理发现/auto 回退/direct/bypass/PAC 标注、E3 SOCKS5 隧道、E4 失败分类 + 只对连接级失败回退一次 + 代理 5xx 记 proxy-error + 凭据不进报告 |
 | `tests/test_verify.py` | 10 | 轻量验证：可用/不可用判定、破坏性路径跳过、预算上限、越界请求被作用域守卫拦下并记录、禁用时零请求、只发 GET、RoE 序列化、TLS 证书探测走 CONNECT |
 | `tests/test_session.py` | 34 | 会话注入到达服务端（含重定向）、注入头大小写无关覆盖、`describe()` 不含凭据值且裸 Cookie 只计数、`secrets()` 只登记 ≥6 字符值并按长度降序、`RECONONE_*`、`--header` 语法校验、逐 host 独立限速、`Retry-After` 与指数退避封顶、成功重置、等待上限与预算收缩、真实 429 退避、整包产物零凭据 |
-| **合计** | **220** | `python -m unittest discover -s tests -t .` 全绿（约 80s） |
+| `tests/test_cookies.py` | 23 | Set-Cookie 会话保持三层：jar 规则（`Domain`/`Path`/`Secure`/过期/删除/上限、`.com` 与跨域声明拒收、IP 目标不接受 `Domain`、头部顺序稳定）、接线（第二跳自动带 cookie、`--cookie` 同名优先、只发一个 `Cookie` 头、关闭后不发）、端到端（`/app/inner` 由 401 变 200、`meta.session.cookies` 只有名称与计数、整包无 cookie 值、markdown 声明、`use_cookies=False`） |
+| **合计** | **243** | `python -m unittest discover -s tests -t .` 全绿（约 77s） |
 
 新增的关键回归：
 
@@ -200,3 +201,29 @@ brief 增加一行摘要；`digest` 排除这两块——「带了谁、跑多�
 先断言服务端确实收到了这三个值（否则「没泄露」可能只是「什么都没发」），再断言整包
 `.json/.md/.txt/.html` 里一个值都搜不到、`report.json` 里留有遮蔽标记、markdown 写明「报告侧脱敏」。
 `REDACTION_VERSION` 因此从 `1` 升到 `2`。
+
+### 6.2 Set-Cookie 会话保持（2026-11）
+
+`--cookie` 只能给一个静态身份。真实站点在第一个响应下发会话 cookie，后续请求都要带回去；
+不带，爬进登录后的区域只会看到登录墙，报告于是把「有内容」写成「401 不可用」——错在**低估**目标。
+
+`reconone/cookiejar.py`（251 行）实现 RFC 6265 的实用子集：
+
+* `Domain`/`Path` 作用域，`Path` 缺省按请求路径的目录推导；
+* `Secure` 双向校验：明文响应不得设置、明文请求不得发送；
+* `Max-Age`（优先）/`Expires`，`Max-Age=0` 视为删除；
+* 上限 200 个，超限淘汰最旧的，保持「同输入同输出」；
+* 线程安全（爬取是并发的），`header_for` 按「路径长者优先 + 名称」稳定排序。
+
+接入点只有两处：`Session._attempt()` 响应后 `store()`、请求前 `_cookie_header()` 合并。
+合并规则是**运维显式给的 `--cookie` 同名值优先**——一次扫描里出现两个身份而不声明，比不带身份更糟。
+
+最关键的取舍是 `Domain`：没有 public suffix list 就无法证明 `.com` 是公共后缀，所以规则反过来写，
+`Domain` 只能是目标本身或它的子域，其余一律拒收并计入 `rejected`。代价是少数「友邻域共享 cookie」
+的站点我们不发，收益是绝不会把目标会话交给未授权主机。（这一条正是测试写错时抓出来的：
+第一版用 `scope.endswith("." + domain)`，`Domain=com` 会被接受。）
+
+`meta.session.cookies` 只有 `enabled / received / stored / rejected / live / carried_requests / names`；
+值只在内存里活一次扫描。`tests/test_cookies.py` 跑一个**只对持 cookie 者**开放 `/app/inner` 的靶站：
+断言该页 200（否则会是 401）、`--cookie` 优先、只发一个 `Cookie` 头、整包文件无 cookie 值、
+markdown 写明会话保持、`use_cookies=False` 时不存不发。
