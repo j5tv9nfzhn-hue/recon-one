@@ -397,8 +397,9 @@ def headers_lower(assets: dict) -> set[str]:
 #: change what an old report meant.
 BET_THRESHOLD = "A"
 
-BET_DEFINITION = ("A：至少 1 个**匿名可访问且带参数**的端点，或 1 个**存活子域暴露非公开面**；"
-                  "两者都未证实且无一项被证伪时判决为 withheld，而不是 not_worth。")
+BET_DEFINITION = ("A：至少 1 个**匿名可访问且带参数**的端点，或 1 个**存活子域暴露非公开面**。"
+                  "判据一是唯一能否决的判据：它明确未命中且扫描够厚 → not_worth；"
+                  "判据二只能把判决升级为 worth，缺它不会把 not_worth 变成 withheld。")
 
 
 def _param_names(endpoint: dict) -> list[str]:
@@ -410,6 +411,16 @@ def _param_names(endpoint: dict) -> list[str]:
     return names
 
 
+def _is_ip(text: str) -> bool:
+    text = str(text or "").strip().strip("[]")
+    if not text:
+        return False
+    if ":" in text:
+        return True
+    parts = text.split(".")
+    return len(parts) == 4 and all(part.isdigit() for part in parts)
+
+
 def bet(report: dict) -> dict:
     """Turn evidence into the one thing a decision needs: worth it or not.
 
@@ -417,12 +428,20 @@ def bet(report: dict) -> dict:
     credentials is the cheapest signal that there is real surface behind the login wall and that
     it accepts input. A live subdomain exposing a non-public face counts as well.
 
-    The three-state answer is the point. `withheld` means the evidence cannot decide — the
-    identity comparison never ran, or the subdomain half was not probed. Collapsing that into
-    `not_worth` would make the tool lie in the direction that costs the operator an engagement.
+    **Criterion 2 may only promote, never veto.** An earlier version reported the subdomain half
+    as `unknown` whenever it had not been probed — which made `not_worth` unreachable: criterion 1
+    could be a decisive miss and the verdict still came out `withheld` forever. A judgement that
+    can only ever say "worth" (or "can't tell") is not a judgement. So: a decisive miss on
+    criterion 1, backed by adequate coverage, is `not_worth`; the unprobed subdomain half is
+    recorded in `unknowns` as something that could *upgrade* the verdict later.
+
+    `withheld` therefore means one specific thing: we could not judge criterion 1 (verification
+    off, parameterised endpoints unverified) or the scan was too thin to trust a negative.
     """
     report = report or {}
     meta = report.get("meta") or {}
+    target = report.get("target") or {}
+    coverage = report.get("coverage") or {}
     ver = report.get("verification") or {}
     summary = ver.get("summary") or {}
     endpoints = report.get("endpoints") or []
@@ -430,10 +449,12 @@ def bet(report: dict) -> dict:
     dual = str(summary.get("identity_model") or "single") == "dual"
     verify_on = bool(ver.get("enabled", False))
 
-    parameterised = [ep for ep in endpoints
-                     if _param_names(ep) and ep.get("verified") == "usable"]
+    with_params = [ep for ep in endpoints if _param_names(ep)]
+    usable_p = [ep for ep in with_params if ep.get("verified") == "usable"]
+    skipped_p = [ep for ep in with_params if ep.get("verified") == "skipped"]
+
     opened, gated, undecided = [], [], []
-    for endpoint in parameterised:
+    for endpoint in usable_p:
         if not dual:
             # No identity was injected: every request this scan made *was* anonymous.
             opened.append(endpoint)
@@ -446,28 +467,44 @@ def bet(report: dict) -> dict:
 
     if opened:
         first, detail = "hit", f"{len(opened)} 个带参数端点无需凭据即可访问"
-    elif undecided or not verify_on:
-        first = "unknown"
-        detail = ("验证未启用，无法判定匿名可访问" if not verify_on
-                  else f"{len(undecided)} 个带参数端点缺少授权对比")
-    elif parameterised:
-        first, detail = "miss", f"{len(gated)} 个带参数端点全部被 401/403 拦住"
+    elif undecided:
+        first, detail = "unknown", f"{len(undecided)} 个带参数端点缺少授权对比"
+    elif not verify_on:
+        first, detail = "unknown", "验证未启用，无法判定匿名可访问"
+    elif usable_p:
+        first, detail = "miss", f"{len(gated)} 个可用的带参数端点全部被 401/403 拦住"
+    elif skipped_p:
+        first, detail = "unknown", f"{len(skipped_p)} 个带参数端点未验证（预算/作用域/排除）"
+    elif with_params:
+        first, detail = "miss", f"{len(with_params)} 个带参数端点全部不可用（404/5xx/连不上）"
     else:
-        first, detail = "miss", "没有带参数且可用的端点"
+        first, detail = "miss", "没有带参数的端点"
 
     subs = (report.get("assets") or {}).get("subdomains") or []
     probed_subs = [sub for sub in subs if sub.get("probed")]
-    if probed_subs:
+    ct = ((report.get("intel") or {}).get("ct")) or {}
+    ct_status = str(ct.get("status") or "")
+    if _is_ip(target.get("domain")):
+        second, second_detail = "miss", "IP 目标：没有子域维度"
+    elif probed_subs:
         second = "hit" if any(sub.get("non_public") for sub in probed_subs) else "miss"
         second_detail = f"{len(probed_subs)} 个存活子域已探测"
     elif subs:
-        second, second_detail = "unknown", f"{len(subs)} 个 CT 子域尚未探测（probed:false）"
+        second = "unknown"
+        second_detail = f"{len(subs)} 个 CT 子域尚未探测（probed:false）"
+    elif ct_status == "ok":
+        second, second_detail = "miss", "CT 已查且未发现子域"
     else:
-        second, second_detail = "unknown", "未获得子域情报（或本轮未启用 CT）"
+        second = "unknown"
+        second_detail = f"子域面未评估（CT 状态：{ct_status or 'n/a'}）"
+
+    truncated = bool(coverage.get("truncated"))
+    probed = int(summary.get("probed") or 0)
+    adequate = verify_on and (probed > 0 or not endpoints) and not truncated
 
     if first == "hit" or second == "hit":
         verdict = "worth"
-    elif first == "unknown" or second == "unknown":
+    elif first == "unknown" or not adequate:
         verdict = "withheld"
     else:
         verdict = "not_worth"
@@ -477,7 +514,19 @@ def bet(report: dict) -> dict:
     elif verdict == "withheld":
         confidence = "low"
     else:
-        confidence = "medium" if (report.get("coverage") or {}).get("complete") else "low"
+        confidence = "medium" if adequate else "low"
+
+    unknowns = []
+    if undecided:
+        unknowns.append(f"{len(undecided)} 个带参数端点缺授权对比")
+    if skipped_p:
+        unknowns.append(f"{len(skipped_p)} 个带参数端点未验证")
+    if second == "unknown":
+        unknowns.append("子域面未评估（可作为改判为 worth 的证据）")
+    if truncated:
+        unknowns.append("扫描被截断（页面/脚本/字节预算）")
+    if verify_on and not probed and endpoints:
+        unknowns.append("验证没有实际探测任何端点")
 
     evidence = [{"path": ep.get("path"), "params": _param_names(ep),
                  "anon_status": (ep.get("authz") or {}).get("anon_status"),
@@ -499,17 +548,19 @@ def bet(report: dict) -> dict:
             {"rule": "live_subdomain_nonpublic", "status": second, "detail": second_detail,
              "count": len(probed_subs)},
         ],
-        "counts": {"parameterised_usable": len(parameterised), "anonymous_open": len(opened),
-                   "gated": len(gated), "undecided": len(undecided),
+        "counts": {"parameterised": len(with_params),
+                   "parameterised_usable": len(usable_p),
+                   "parameterised_unverified": len(skipped_p),
+                   "anonymous_open": len(opened), "gated": len(gated),
+                   "undecided": len(undecided),
                    "anonymous_open_write": len(writes)},
         "evidence": evidence,
         "kill_criteria": [
             "命中的写端点若全部需要 CSRF token / 二次确认 → 降为「需凭据才能利用」",
             "带参数端点改为返回 401/403（例如上线了 WAF 规则）→ 判决转 withheld",
-            "子域全部无解析 → 资产面只到主域，第二判据不再成立",
+            "判据二探到存活子域且暴露非公开面 → 由 not_worth/withheld 改判 worth",
         ],
-        "unknowns": ([f"{len(undecided)} 个带参数端点缺授权对比"] if undecided else [])
-                    + (["子域未探测"] if second == "unknown" else []),
-        "note": ("三态判决：worth / not_worth / withheld。withheld 表示证据不足以下注，"
-                 "不等于不值得——当成 not_worth 会系统性低估目标。"),
+        "unknowns": unknowns,
+        "note": ("三态判决：worth / not_worth / withheld。判据二只能升级、不能否决——"
+                 "否则 not_worth 永远不可达。withheld 只表示判据一判不了，或扫描太薄不信负数。"),
     }

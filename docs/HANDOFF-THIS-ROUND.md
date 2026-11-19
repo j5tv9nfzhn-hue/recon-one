@@ -104,18 +104,18 @@ recon-one/
 
 | 文件 | 项数 | 覆盖 |
 |---|---|---|
-| `tests/test_pipeline.py` | 72 | 扫描、评分、判定、请求体提取、确定性（含**请求台账逐行一致**）、传输加固、DNS 应答校验、`--no-js` 模式的端点来源与画像注入、AC25 请求台账与 manifest 哈希、**AC26 下注判决与两次扫描一致** |
+| `tests/test_pipeline.py` | 75 | 扫描、评分、判定、请求体提取、确定性（含**请求台账逐行一致**）、传输加固、DNS 应答校验、`--no-js` 端点来源与画像注入、AC25 请求台账与 manifest 哈希、AC26 判决与两次扫描一致、**纯静态站必须判 not_worth（3 项）** |
 | `tests/test_concurrency.py` | 11 | 并发与串行同序同结果、共享字节预算、并发度上限 |
 | `tests/test_web.py` | 17 | 令牌一次性、弱密码拒绝、存储边界、CSRF、匿名 GET 拒绝、读取时重算、会话持久化、产物增删查、多目标批次、对比接口 |
 | `tests/test_intel.py` | 19 | CT 只留目标域、CertSpotter 失败回退 crt.sh、失败折叠成 `status`、存档路径与敏感路径、geo/CVE 默认关闭、站点类型规则、**重试吞掉一次 502**、**子域落地成 `probed:false` 资产**、digest 排除运行遥测 |
-| `tests/test_triage.py` | 19 | 权重恒定、指数与带、覆盖率不足拒绝出结论、WAF/版本抬难度、端点面抬价值、`unknown≠fail`、同输入同输出、主动项接线与权重占比；**下注判决 8 项**（匿名单身份命中、双身份 gated 不算暴露、withheld 不等于不值得、子域未探 unknown、改判条件必给、纯函数） |
+| `tests/test_triage.py` | 22 | 权重恒定、指数与带、覆盖率不足拒绝出结论、WAF/版本抬难度、端点面抬价值、`unknown≠fail`、同输入同输出、主动项接线与权重占比；**下注判决 11 项**（匿名命中、置信度、gated 不算暴露、withheld≠不值得、**子域未探不能否决 not_worth**、静态站 not_worth、薄扫描 withheld、IP 无子域维度、改判条件必给、纯函数） |
 | `tests/test_doctor.py` | 5 | 五项行为检查全过、版本可读、坏检查被报告而不抛出、CLI 退出码 0/4 |
 | `tests/test_redaction.py` | 28 | 四层定点脱敏（头/URL/证据/密钥）+ **第五层两道扫描**：形状（`hosts[].url`、`intel.archive` 行、`well_known` 正文）与**本次发出凭据的值级遮蔽**（页面标题/正文/`X-Echo-*` 头回显都遮掉，最长值优先，短值不登记，幂等）；`meta.redaction` 可机读 |
 | `tests/test_egress.py` | 16 | E1 代理全量转发（目标零直连、绝对 URI、CONNECT）、E2 系统代理发现/auto 回退/direct/bypass/PAC 标注、E3 SOCKS5 隧道、E4 失败分类 + 只对连接级失败回退一次 + 代理 5xx 记 proxy-error + 凭据不进报告 |
 | `tests/test_verify.py` | 17 | 验证 v2：可用/不可用判定、破坏性动词按词边界跳过（`/applications` 不被误伤）、预算上限、越界被拦并记录、禁用时零请求、只发 HEAD/GET 绝无 POST、HEAD 被拒补一次 GET、**双身份授权差分**（gated / anonymous_open / same）、单身份不假装做过差分、TLS 证书探测走 CONNECT |
 | `tests/test_session.py` | 34 | 会话注入到达服务端（含重定向）、注入头大小写无关覆盖、`describe()` 不含凭据值且裸 Cookie 只计数、`secrets()` 只登记 ≥6 字符值并按长度降序、`RECONONE_*`、`--header` 语法校验、逐 host 独立限速、`Retry-After` 与指数退避封顶、成功重置、等待上限与预算收缩、真实 429 退避、整包产物零凭据 |
 | `tests/test_cookies.py` | 23 | Set-Cookie 会话保持三层：jar 规则（`Domain`/`Path`/`Secure`/过期/删除/上限、`.com` 与跨域声明拒收、IP 目标不接受 `Domain`、头部顺序稳定）、接线（第二跳自动带 cookie、`--cookie` 同名优先、只发一个 `Cookie` 头、关闭后不发）、端到端（`/app/inner` 由 401 变 200、`meta.session.cookies` 只有名称与计数、整包无 cookie 值、markdown 声明、`use_cookies=False`） |
-| **合计** | **261** | `python -m unittest discover -s tests -t .` 全绿（约 67s） |
+| **合计** | **267** | `python -m unittest discover -s tests -t .` 全绿（约 105s） |
 
 新增的关键回归：
 
@@ -274,3 +274,39 @@ manifest 里是真实 sha256 而非 `redacted`）+ `test_ac14_determinism` 里�
 
 **还没做的**：判据二（子域探活）仍是 `unknown`，所以判决永远带一条 `unknowns`；控制台还没有判决面板
 （只进报告与 markdown）。下一轮就是子域探活 + 定向内容发现。
+
+### 6.5 一次证伪：判决必须能说"不值"（2026-11）
+
+你要求拿纯公开静态站验证"敢说不值"。我先不改代码，直接跑，结果**证伪了**：
+
+```
+verdict: withheld
+criteria: [('anonymous_parameterized','miss'), ('live_subdomain_nonpublic','unknown')]
+```
+
+根因不是判据一判错，而是判据二**恒定 unknown**（子域探活还没实现），而旧规则是
+`elif first == "unknown" or second == "unknown": withheld`。于是 `not_worth` 在这套逻辑里
+**根本不可达**——工具只会说"值"或"看不清"，正是你担心的情况，只是藏得更深。
+
+修法（`triage.bet()`）：
+
+1. **判据二只能升级，不能否决。** 它探到暴露的存活子域才把判决抬到 `worth`；缺它只写进 `unknowns`。
+2. 判据一独占否决权：明确未命中（没有带参数端点 / 全部不可用 / 全被 401、403 拦）+ 扫描够厚
+   （验证跑过、未截断）→ `not_worth`。
+3. `withheld` 收紧到两种：判据一判不了（验证关掉、带参数端点未验证），或扫描被截断不信负数。
+4. CT 状态参与判定：`ok` 且 0 子域 = `miss`（完成的观测）；IP 目标 = `miss`（没有子域维度）；
+   只有 CT 未运行/失败、或有子域但未探测才是 `unknown`。
+
+修复后实测（同一个纯静态站，三页 HTML、无表单无参数）：
+
+```
+not_worth medium
+criteria: [('anonymous_parameterized','miss','没有带参数的端点'),
+           ('live_subdomain_nonpublic','miss','IP 目标：没有子域维度')]
+report.md: - 判决：**不值**（阈值 A，置信度 medium，身份模型 anonymous）
+```
+
+回归：`test_pipeline.py::TestStaticSiteIsJudgedNotWorth`（3 项：站点确实是静态的、判决是
+`not_worth`、markdown 写「不值」且不出现「值得打」）+ `test_triage.py` 的
+`test_unprobed_subdomains_cannot_block_a_negative` / `test_a_thin_scan_refuses_to_say_not_worth`
+/ `test_an_ip_target_has_no_subdomain_dimension`。全量 **267 tests OK**。

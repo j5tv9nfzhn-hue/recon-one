@@ -1,17 +1,21 @@
 """Acceptance tests: every criterion in docs/ACCEPTANCE.md is asserted here."""
 from __future__ import annotations
 
+import http.server
 import json
 import os
 import shutil
+import socketserver
 import sys
 import tempfile
+import threading
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
+from reconone import egress as egressmod                      # noqa: E402
 from reconone import jsanalyze                                # noqa: E402
 from reconone import report as reportmod                     # noqa: E402
 from reconone import score                                    # noqa: E402
@@ -964,6 +968,93 @@ class TestNoJsMode(unittest.TestCase):
         self.assertIn("worth.subdomains", prof["coverage"]["unknown"])
         self.assertEqual(self.report["intel"]["ct"]["status"], "disabled")
         self.assertIn("no AI", prof["generated_by"])
+
+
+class TestStaticSiteIsJudgedNotWorth(unittest.TestCase):
+    """Falsification: a judgement that can only ever say "worth" is not a judgement.
+
+    A pure public static site — three HTML pages, no forms, no parameters, no API, no JS —
+    must come out `not_worth`. If this ever regresses to `withheld` or `worth`, the criterion
+    has stopped discriminating and the whole bet sheet is decoration.
+    """
+
+    PAGES = {
+        "/": '<html><head><title>Home</title></head><body>'
+             '<a href="/about">about</a> <a href="/contact">contact</a></body></html>',
+        "/about": '<html><head><title>About</title></head><body>'
+                  '<a href="/">home</a></body></html>',
+        "/contact": '<html><head><title>Contact</title></head><body>'
+                    'mail: hi@example.com</body></html>',
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        pages = cls.PAGES
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def do_HEAD(self):                                  # noqa: N802
+                self._go(False)
+
+            def do_GET(self):                                   # noqa: N802
+                self._go(True)
+
+            def _go(self, with_body: bool):
+                page = pages.get(self.path.split("?")[0])
+                if page is None:
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                data = page.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                if with_body:
+                    self.wfile.write(data)
+
+        cls.server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        cls.server.daemon_threads = True
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        port = cls.server.server_address[1]
+        cls.tmp = tempfile.mkdtemp(prefix="recon-one-static-")
+        cls.out = os.path.join(cls.tmp, "run")
+        cls.report, cls.code = run_scan(
+            f"127.0.0.1:{port}", cls.out, "fast", {"max_pages": 10},
+            use_dns=False, use_js=False, use_intel=False, quiet=True,
+            egress=egressmod.resolve("direct"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_the_static_site_is_really_static(self):
+        """Guard the guard: if the fixture grew an endpoint, the test would mean nothing."""
+        endpoints = self.report["endpoints"]
+        self.assertTrue(endpoints, "链接会被当作端点，但都不应带参数")
+        self.assertEqual([ep for ep in endpoints if ep.get("params")], [],
+                         f"静态站不应出现带参数的端点：{endpoints}")
+
+    def test_verdict_is_not_worth(self):
+        bet = self.report["bet"]
+        self.assertEqual(bet["verdict"], "not_worth",
+                         f"纯静态站被判成了 {bet['verdict']}：判据失去区分力")
+        self.assertEqual([c["status"] for c in bet["criteria"]], ["miss", "miss"])
+        self.assertEqual(bet["counts"]["anonymous_open"], 0)
+
+    def test_markdown_says_not_worth_in_plain_words(self):
+        with open(os.path.join(self.out, "report", "report.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("## 下注判决", text)
+        self.assertIn("**不值**", text)
+        self.assertNotIn("**值得打**", text)
 
 
 if __name__ == "__main__":

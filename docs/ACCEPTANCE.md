@@ -6,8 +6,8 @@
 python -m unittest discover -s tests -t .
 ```
 
-当前结果：**261 tests OK**（`test_pipeline.py` 72 / `test_concurrency.py` 11 / `test_web.py` 17 /
-`test_intel.py` 19 / `test_triage.py` 19 / `test_doctor.py` 5 / `test_redaction.py` 28 /
+当前结果：**267 tests OK**（`test_pipeline.py` 75 / `test_concurrency.py` 11 / `test_web.py` 17 /
+`test_intel.py` 19 / `test_triage.py` 22 / `test_doctor.py` 5 / `test_redaction.py` 28 /
 `test_egress.py` 16 / `test_verify.py` 17 / `test_session.py` 34 / `test_cookies.py` 23），全部走本地靶站或纯函数，不访问公网。
 
 ## 验收矩阵
@@ -39,7 +39,7 @@ python -m unittest discover -s tests -t .
 | AC23 | 会话注入与限速：Cookie/Bearer/自定义头到达服务端且重定向后仍携带；`meta.session` 只含头名与 Cookie 键名（**无键名的裸 Cookie 片段只计数**），`describe()`/`secrets()` 都不写出值，整包产物里搜不到任何凭据；`--rate N` 按 host 独立限速（`wait_ms` 逐请求记账），429/503 按 `Retry-After` 或指数退避（0.5→8s 封顶）推后该 host 的下一次请求，成功即重置；单次等待有上限且受预算约束 | `test_session.py`（34 项）/ `test_web.py::TestConsoleSessionPassThrough` |
 | AC24 | Set-Cookie 会话保持：`Domain`/`Path`/`Secure`/`Max-Age` 按 RFC 6265 子集收发，`Max-Age=0` 即删除；**`Domain` 只接受目标或其子域**（`.com` 拒收并计数）；`--cookie` 的同名值优先于 jar；第二跳请求自动带上第一跳拿到的会话（`/app` 由 401 变 200）；`meta.session.cookies` 只记计数与名称，整包文件搜不到任何 cookie 值；`--no-cookies` 关闭 | `test_cookies.py`（23 项） |
 | AC25 | 请求台账：`report/requests.jsonl` 逐行记录本次真正发出的每个请求（`n/method/url/status/egress/error`，URL 已脱敏、**不含时间与耗时**），按 `(method,url,status,error)` 排序后编号，因此同目标两次扫描字节一致；该文件进入 `manifest.json` 且带真实 sha256（非 `redacted`）；GraphQL introspection 的 POST 也必须出现在台账里 | `test_pipeline.py::FixtureScan::test_ac25_request_ledger_is_complete_and_listed` / `test_ac14_determinism` |
-| AC26 | 下注判决（阈值 A）：`report.bet` 给出 `verdict ∈ {worth, not_worth, withheld}` + `confidence` + 两条判据（`anonymous_parameterized` / `live_subdomain_nonpublic`）+ 计数 + `evidence` + `kill_criteria` + `unknowns`；匿名扫描时"可用且带参数"即命中，注入身份后必须由**授权差分**（anon 2xx）证明；`--no-verify` 或缺子域情报时判 `withheld` 而非 `not_worth`；markdown 以「## 下注判决」领起，两张扫描同输入同输出 | `test_pipeline.py::FixtureScan::test_ac26_bet_sheet_leads_the_report` / `test_ac26_bet_is_stable_across_identical_scans` / `test_triage.py::TestBet`（8 项） |
+| AC26 | 下注判决（阈值 A）：`report.bet` 给出 `verdict ∈ {worth, not_worth, withheld}` + `confidence` + 两条判据 + 计数 + `evidence` + `kill_criteria` + `unknowns`；匿名扫描时"可用且带参数"即命中，注入身份后必须由**授权差分**（anon 2xx）证明；**判据一独占否决权**（明确未命中 + 验证跑过 + 未截断 → `not_worth`），判据二只能升级为 `worth`、不能把 `not_worth` 压成 `withheld`；`withheld` 仅当判据一判不了或扫描被截断；**纯公开静态站必须判 `not_worth`**；markdown 以「## 下注判决」领起，两次扫描同输入同输出 | `test_pipeline.py::TestStaticSiteIsJudgedNotWorth`（3 项）/ `test_ac26_bet_sheet_leads_the_report` / `test_ac26_bet_is_stable_across_identical_scans` / `test_triage.py::TestBet`（11 项） |
 
 > AC13 的「必备小节」由测试断言为 3 个（已确认事实 / 未覆盖项 / 建议动作）；`handoff.md` 实际含 5 节，
 > 停机条件在第 4 节。文档与断言以**测试**为准。

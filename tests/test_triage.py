@@ -184,11 +184,14 @@ class TestBet(unittest.TestCase):
 
     def _report(self, **over):
         base = {
+            "target": {"domain": "app.example.com"},
             "meta": {"session": {"enabled": False}},
-            "coverage": {"complete": True},
-            "verification": {"enabled": True, "summary": {"identity_model": "single"}},
+            "coverage": {"complete": True, "truncated": False},
+            "verification": {"enabled": True,
+                             "summary": {"identity_model": "single", "probed": 1}},
             "endpoints": [],
             "assets": {"subdomains": []},
+            "intel": {"ct": {"status": "ok", "subdomains": []}},
         }
         base.update(over)
         return base
@@ -216,7 +219,7 @@ class TestBet(unittest.TestCase):
     def test_gated_under_dual_identity_is_not_exposure(self):
         report = self._report(
             meta={"session": {"enabled": True}},
-            verification={"enabled": True, "summary": {"identity_model": "dual"}},
+            verification={"enabled": True, "summary": {"identity_model": "dual", "probed": 1}},
             endpoints=[self._endpoint(authz_open=False)],
             assets={"subdomains": [{"host": "h.example.com", "probed": True}]})
         bet = triage.bet(report)
@@ -227,7 +230,7 @@ class TestBet(unittest.TestCase):
     def test_anonymous_open_under_dual_identity_is_a_hit(self):
         report = self._report(
             meta={"session": {"enabled": True}},
-            verification={"enabled": True, "summary": {"identity_model": "dual"}},
+            verification={"enabled": True, "summary": {"identity_model": "dual", "probed": 1}},
             endpoints=[self._endpoint(authz_open=True, authz={"anon_status": 200})])
         bet = triage.bet(report)
         self.assertEqual(bet["verdict"], "worth")
@@ -240,12 +243,37 @@ class TestBet(unittest.TestCase):
         self.assertEqual(bet["verdict"], "withheld")
         self.assertIn("withheld", bet["note"])
 
-    def test_unprobed_subdomains_are_reported_as_unknown(self):
+    def test_unprobed_subdomains_cannot_block_a_negative(self):
+        """Criterion 2 may only promote: an unprobed subdomain half must not force `withheld`."""
         bet = triage.bet(self._report(assets={"subdomains": [{"host": "a.example.com",
-                                                              "probed": False}]}))
+                                                              "probed": False}]},
+                                      intel={"ct": {"status": "ok",
+                                                    "subdomains": ["a.example.com"]}}))
         self.assertEqual(bet["criteria"][1]["status"], "unknown")
-        self.assertIn("子域未探测", bet["unknowns"])
+        self.assertIn("子域面未评估", "；".join(bet["unknowns"]))
+        self.assertEqual(bet["verdict"], "not_worth",
+                         "判据一已明确未命中，缺子域不能变成 withheld")
+
+    def test_a_pure_static_site_is_not_worth(self):
+        """The falsification case: nothing parameterised, nothing gated, CT found no subdomains."""
+        bet = triage.bet(self._report(endpoints=[],
+                                      verification={"enabled": True,
+                                                    "summary": {"identity_model": "single",
+                                                                "probed": 0}}))
+        self.assertEqual(bet["verdict"], "not_worth")
+        self.assertEqual([c["status"] for c in bet["criteria"]], ["miss", "miss"])
+        self.assertEqual(bet["unknowns"], [])
+
+    def test_a_thin_scan_refuses_to_say_not_worth(self):
+        bet = triage.bet(self._report(endpoints=[], coverage={"complete": False,
+                                                             "truncated": True}))
         self.assertEqual(bet["verdict"], "withheld")
+        self.assertIn("扫描被截断", "；".join(bet["unknowns"]))
+
+    def test_an_ip_target_has_no_subdomain_dimension(self):
+        bet = triage.bet(self._report(target={"domain": "127.0.0.1"}))
+        self.assertEqual(bet["criteria"][1]["status"], "miss")
+        self.assertEqual(bet["verdict"], "not_worth")
 
     def test_kill_criteria_are_always_stated(self):
         for endpoints in ([self._endpoint()], []):

@@ -36,7 +36,7 @@ cd recon-one
 python -m reconone doctor                     # 先确认 httpx/anyio/ssl/dns 真的能用（1 秒，不联网）
 python -m reconone ui                         # 启动 Web 控制台（前后端同一进程）
 python -m reconone scan --domain example.com --profile default   # 纯命令行
-python -m unittest discover -s tests -t .     # 261 项测试（全部本地、不联网）
+python -m unittest discover -s tests -t .     # 267 项测试（全部本地、不联网）
 ```
 
 常用开关（`scan`）：`--no-js` 不下载前端 bundle、`--no-intel` 关闭被动情报、`--geo` 查 IP 地理位置、
@@ -173,16 +173,21 @@ python -m reconone ui --host 0.0.0.0                       # 仅在你确知网�
 
 ### 1.3 下注判决：worth / not_worth / withheld
 
-画像解决"好不好打"，**判决**解决"要不要下注"。报告顶层有 `bet` 块（阈值 A）：
+画像解决"好不好打"，**判决**解决"要不要下注"。报告顶层有 `bet` 块（阈值 A），两条判据：
 
-- 判据一 `anonymous_parameterized`：**带参数**的端点**无需凭据**即可访问。没有注入身份时，本次扫描本身
-  就是匿名的，命中即算；注入了 `--cookie/--bearer` 时，用**两次 GET**（认证 / 匿名）比对，只有匿名侧
-  2xx/3xx 才算命中，并用响应长度与标题差异给出内容证据。
-- 判据二 `live_subdomain_nonpublic`：存活子域暴露非公开面（子域探测落地后生效，当前记 `unknown`）。
+- `anonymous_parameterized`：**带参数**的端点**无需凭据**即可访问。没有注入身份时本次扫描本身即匿名，
+  命中即算；注入了 `--cookie/--bearer` 时用**两次 GET**（认证 / 匿名）比对，只有匿名侧 2xx/3xx 才算，
+  并给出响应长度与标题差异作为内容证据。
+- `live_subdomain_nonpublic`：存活子域暴露非公开面。
 
-三态判决是重点：`withheld` 表示证据不足以下注（例如关掉了验证、或子域没探），**不等于不值得**。
-把它读成 `not_worth` 会系统性低估目标，所以报告里永远同时给出判据、计数、`kill_criteria`（什么会让我
-改判）与 `unknowns`。
+**判决规则（一次证伪驱动的修正）**：判据一是唯一能否决的判据。它明确未命中（没有带参数端点 / 全部
+不可用 / 全部被 401、403 拦住）且扫描够厚（验证跑过、未被截断）→ `not_worth`。判据二**只能升级**：
+探到暴露的存活子域才把判决抬到 `worth`，缺它不会把 `not_worth` 变成 `withheld`。
+
+早期版本把"子域未探测"记成 `unknown` 并据此判 `withheld`，结果 `not_worth` **永远不可达**——纯公开
+静态站也会被判"看不清"。修复后静态站稳定输出 `not_worth`，并有端到端回归钉住它
+（`TestStaticSiteIsJudgedNotWorth`）。`withheld` 现在只剩两种含义：判据一判不了（验证关掉、带参数端点
+未验证），或扫描太薄不信负数（被截断）。报告永远并排列出判据、计数、`kill_criteria` 与 `unknowns`。
 
 顺带说明验证引擎的取法：单身份用 `HEAD` 判存在（比 GET 便宜、无响应体），服务器拒绝 `HEAD`（405/501）
 时补一次 `GET`；双身份用两次 `GET` 做授权差分。破坏性动词（`close/void/refund/apply…`）按**词边界**
@@ -235,7 +240,7 @@ runs/<domain>/
 
 ## 4. 验收标准
 
-完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。26 条验收项由测试断言。当前全仓 **261 tests OK**（`test_pipeline` 72 / `test_concurrency` 11 / `test_web` 17 / `test_intel` 19 / `test_triage` 19 / `test_doctor` 5 / `test_redaction` 28 / `test_egress` 16 / `test_verify` 17 / `test_session` 34 / `test_cookies` 23），`python -m unittest discover -s tests -t .` 可直接复现。
+完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。26 条验收项由测试断言。当前全仓 **267 tests OK**（`test_pipeline` 75 / `test_concurrency` 11 / `test_web` 17 / `test_intel` 19 / `test_triage` 22 / `test_doctor` 5 / `test_redaction` 28 / `test_egress` 16 / `test_verify` 17 / `test_session` 34 / `test_cookies` 23），`python -m unittest discover -s tests -t .` 可直接复现。
 
 ## 5. 已知限制
 
