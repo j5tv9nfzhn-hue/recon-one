@@ -1174,10 +1174,15 @@
       const rows = shownAll ? eps : eps.slice(0, LIMIT);
       rows.forEach((e, i) => {
         const tr = el("tr");
+        const verdict = e.verified || "";
+        if (verdict === "usable") tr.classList.add("is-live");
+        else if (verdict === "unusable") tr.classList.add("is-dead");
         tr.appendChild(el("td", "num al-r col-n", String(i + 1)));
         tr.appendChild(el("td", "mono", (e.methods || []).join(",")));
         tr.appendChild(el("td", "mono", e.path || ""));
         tr.appendChild(el("td", "dim", e.confidence || ""));
+        tr.appendChild(el("td", "ep-verdict", verdict === "usable" ? "可用"
+          : verdict === "unusable" ? "不可用" : "—"));
         tr.appendChild(el("td", "mono dim", (e.params || []).join(", ")));
         epsBody.appendChild(tr);
       });
@@ -1188,8 +1193,11 @@
       }
       more.hidden = shownAll || !eps.length;
       more.textContent = `展开全部 ${eps.length} 个`;
+      const usable = eps.filter((e) => e.verified === "usable").length;
+      const dead = eps.filter((e) => e.verified === "unusable").length;
       $("epCount").textContent = eps.length
-        ? (shownAll ? `${eps.length} 个` : `显示 ${Math.min(LIMIT, eps.length)} / ${eps.length} 个`)
+        ? `${shownAll ? `${eps.length} 个` : `显示 ${Math.min(LIMIT, eps.length)} / ${eps.length} 个`}` +
+          ` · 可用 ${usable}（红）/ 不可用 ${dead}（灰）`
         : "";
     };
     more.onclick = () => { shownAll = true; paintEndpoints(); };

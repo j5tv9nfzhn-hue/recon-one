@@ -238,6 +238,12 @@ def build_brief(report: dict, budget: int = DEFAULT_BUDGET, report_dir: str = ""
           f"端点 {counts.get('endpoints',0)} 个 / 参数 {counts.get('parameters',0)} 个")
     b.add(f"- 前端密钥 {counts.get('secrets',0)} / API 规范 {counts.get('specs',0)} 份 / "
           f"GraphQL {counts.get('graphql',0)} 个 / source map {counts.get('sourcemaps',0)} 份")
+    ver = report.get("verification") or {}
+    if ver:
+        s = ver.get("summary") or {}
+        state = "" if ver.get("enabled", True) else "（本次未启用）"
+        b.add(f"- 验证{state}：可用（红）{s.get('usable', 0)} / 不可用（灰）{s.get('unusable', 0)}"
+              f" / 跳过 {s.get('skipped', 0)}，已验证请求 {s.get('requests', 0)}/{s.get('max_requests', 0)}")
     if gaps:
         b.add("")
         b.add("**未覆盖（不要当作已排除，这些是真空区）**")

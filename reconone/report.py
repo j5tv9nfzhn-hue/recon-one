@@ -272,7 +272,8 @@ def _scrub_hypothesis(item: dict) -> dict:
 
 def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, js, api,
              findings, hyp, session, started_at, elapsed, probe_status,
-             intel: dict | None = None, authorized_by: str = "") -> dict:
+             intel: dict | None = None, authorized_by: str = "",
+             verification: dict | None = None) -> dict:
     sourcemaps = [s["sourcemap"] for s in js.get("scripts", []) if s.get("sourcemap")]
     # Passive assets and active-probe telemetry are computed once, here, so every consumer
     # (markdown, brief, console, compare view) reads the same numbers.
@@ -341,6 +342,9 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
             "probe_stats": probe_stats,
             "redaction": redactmod.scope_note(),
             "egress": httpmod.egress_view(session),
+            # The rules this run played by, and what they stopped. Present even when the
+            # verification stage is off, so "no verification" is recorded, not implied.
+            "roe": (verification or {}).get("roe") or {},
             # The premises this run rested on, recorded rather than assumed. `authorized_by`
             # is free text (ticket id, contract reference, pentest window) so an auditor can
             # tie the package to the paper that allowed it.
@@ -366,6 +370,9 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
                 "specs": len(api.get("specs", [])),
                 "graphql": len((api.get("graphql") or {}).get("endpoints", [])),
                 "subdomains": len(subdomains),
+                "verified_usable": int(((verification or {}).get("summary") or {}).get("usable", 0)),
+                "verified_unusable": int(((verification or {}).get("summary") or {}).get("unusable", 0)),
+                "verified_skipped": int(((verification or {}).get("summary") or {}).get("skipped", 0)),
                 "endpoints_testable": sum(1 for e in endpoints if e.get("params")),
                 "endpoints_write": sum(
                     1 for e in endpoints
@@ -397,6 +404,7 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
     # Passive intel and the target profile are attached last, but *before* the digest, so a
     # reader can verify the whole package with one hash.
     report["intel"] = intel or {}
+    report["verification"] = verification or {}
     # Fifth redaction layer: a shape-based sweep over the *whole* report, so fields added
     # later (JS-derived host URLs, third-party archive rows, well-known bodies) are covered
     # by default. Runs before the profile/digest so every derived artefact sees masked text.
@@ -465,6 +473,8 @@ def _digest_view(report: dict) -> dict:
         view["intel"] = _stable_intel(report.get("intel"))
     if "profile" in report:
         view["profile"] = _stable_profile(report.get("profile"))
+    if "verification" in report:
+        view["verification"] = _stable_verification(report.get("verification"))
     headers = ((view.get("assets") or {}).get("http") or {}).get("headers")
     if isinstance(headers, dict) and headers:
         assets = view["assets"]
@@ -533,6 +543,54 @@ def _score_markdown(report: dict) -> list[str]:
         lines += [""]
     if block.get("disclaimer"):
         lines += ["> " + block["disclaimer"], ""]
+    return lines
+
+
+def _stable_verification(block) -> dict:
+    """Verification results minus the parts that vary run to run (elapsed ms)."""
+    if not isinstance(block, dict):
+        return {}
+    out = {k: v for k, v in block.items() if k not in ("results", "by_path")}
+    out["results"] = [{k: v for k, v in entry.items() if k != "ms"}
+                      for entry in block.get("results") or []]
+    return out
+
+
+def _verification_markdown(report: dict) -> list[str]:
+    """可用（红）/ 不可用（灰），以及被 RoE 拦下而没发出去的条目。"""
+    block = report.get("verification") or {}
+    if not block:
+        return []
+    summary = block.get("summary") or {}
+    roe = block.get("roe") or {}
+    lines = ["", "## 验证（轻量，一次 GET 每端点）", ""]
+    if not block.get("enabled", True):
+        lines += [f"> 本次未启用验证（{roe.get('source', '--no-verify')}）。"
+                  f"端点结论仍只是声明，未经服务端确认。", ""]
+        return lines
+    lines += [
+        f"- 可用（红）：**{summary.get('usable', 0)}** · 不可用（灰）：**{summary.get('unusable', 0)}**"
+        f" · 跳过：{summary.get('skipped', 0)} · 已验证请求：{summary.get('requests', 0)}"
+        f"/{summary.get('max_requests', 0)}",
+        f"- RoE：作用域 `{roe.get('scope_domain', '?')}`，方法 {', '.join(roe.get('allowed_methods') or [])}，"
+        f"排除词 {len(roe.get('excluded') or [])} 个（破坏性路径不探测）",
+        "",
+    ]
+    usable = [r for r in block.get("results") or [] if r.get("verdict") == "usable"]
+    if usable:
+        lines += ["| 端点 | 状态 | 判定 |", "|---|---:|---|"]
+        lines += [f"| `{r.get('path', '')}` | {r.get('status', 0)} | 可用（红） |"
+                  for r in usable[:15]]
+        if len(usable) > 15:
+            lines.append(f"| …另有 {len(usable) - 15} 个可用端点 | | |")
+        lines.append("")
+    skipped = [r for r in block.get("results") or [] if r.get("verdict") == "skipped"]
+    if skipped:
+        reasons: dict[str, int] = {}
+        for entry in skipped:
+            reason = str(entry.get("reason") or "").split("（")[0]
+            reasons[reason] = reasons.get(reason, 0) + 1
+        lines += ["跳过原因：" + "；".join(f"{k} × {v}" for k, v in sorted(reasons.items())), ""]
     return lines
 
 
@@ -631,6 +689,7 @@ def render_markdown(report: dict) -> str:
         lines.append(f"| {key} | {value} |")
     lines += _score_markdown(report)
     lines += _profile_markdown(report)
+    lines += _verification_markdown(report)
     lines += ["", "## 技术栈", ""]
     lines += [f"- {tech['name']}（{', '.join(tech['evidence'])}）" for tech in report["assets"]["technology"]] or ["- 未识别"]
     lines += ["", "## 发现", "", "| ID | 级别 | 类别 | 标题 |", "|---|---|---|---|"]

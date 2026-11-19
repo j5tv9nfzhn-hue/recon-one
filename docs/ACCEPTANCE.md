@@ -1,14 +1,14 @@
 # 验收标准
 
-20 条验收项由 `tests/test_pipeline.py`（AC1–AC15）、`tests/test_triage.py`（AC16–AC17）、`tests/test_doctor.py`（AC18）、`tests/test_web.py`（AC19）与 `tests/test_redaction.py`（AC20）自动断言；运行：
+22 条验收项由 `tests/test_pipeline.py`（AC1–AC15）、`tests/test_triage.py`（AC16–AC17）、`tests/test_doctor.py`（AC18）、`tests/test_web.py`（AC19）、`tests/test_redaction.py`（AC20）、`tests/test_egress.py`（AC21）与 `tests/test_verify.py`（AC22）自动断言；运行：
 
 ```powershell
 python -m unittest discover -s tests -t .
 ```
 
-当前结果：**166 tests OK**（`test_pipeline.py` 68 / `test_concurrency.py` 11 / `test_web.py` 16 /
-`test_intel.py` 19 / `test_triage.py` 11 / `test_doctor.py` 5 / `test_redaction.py` 20 / `test_egress.py` 16），
-全部走本地靶站或纯函数，不访问公网。
+当前结果：**177 tests OK**（`test_pipeline.py` 69 / `test_concurrency.py` 11 / `test_web.py` 16 /
+`test_intel.py` 19 / `test_triage.py` 11 / `test_doctor.py` 5 / `test_redaction.py` 20 /
+`test_egress.py` 16 / `test_verify.py` 10），全部走本地靶站或纯函数，不访问公网。
 
 ## 验收矩阵
 
@@ -35,6 +35,7 @@ python -m unittest discover -s tests -t .
 | AC19 | 横向对比接口需登录，每行给出 `worth / ease(100-hardness) / index / counts`（按当前模型重算评分）；子域作为 `probed:false` 资产落地 | `test_web.py::TestServer::test_compare_lists_every_run_with_three_decision_axes` / `test_intel.py::TestSubdomainsBecomeAssets` |
 | AC20 | 第五层兜底脱敏：`assets.hosts[].url`、`report.intel` 的 Wayback 行、`assets.well_known` 正文里的凭据形状都被抹掉，而计数/路径/Cookie 属性原样保留；重复清洗结果不变 | `test_redaction.py::TestWholeReportSweep::test_fields_that_used_to_leak_are_covered` / `test_strict_keys_are_masked_and_already_masked_values_are_left_alone` |
 | AC21 | 出口（E1–E4）：`--proxy` 后所有请求经代理、目标零直连；系统代理从 env/WinINET 发现且 PAC 显式标注不支持；SOCKS5 可用；失败分类为 `connect-timeout/reset/refused/tls`，只有连接级失败回退一次，代理 5xx 记为 `proxy-error` 而不当页面 | `test_egress.py::TestProxyEgress` / `TestSystemProxy` / `TestSocks5` / `TestFailureClassification` |
+| AC22 | 轻量验证：每端点一次 GET，可用（2xx/3xx/401/403/405/429）标红、404/410 与连接失败标灰；RoE 限定方法与上限、破坏性路径不发送、越界请求被作用域守卫拦下且记录；`meta.roe` + `verification.summary` 可追溯；TLS 证书探测与请求走同一出口 | `test_verify.py`（10 项）/ `test_pipeline.py::FixtureScan::test_verification_stage_is_bound_and_recorded` |
 
 > AC13 的「必备小节」由测试断言为 3 个（已确认事实 / 未覆盖项 / 建议动作）；`handoff.md` 实际含 5 节，
 > 停机条件在第 4 节。文档与断言以**测试**为准。

@@ -36,13 +36,13 @@ cd recon-one
 python -m reconone doctor                     # 先确认 httpx/anyio/ssl/dns 真的能用（1 秒，不联网）
 python -m reconone ui                         # 启动 Web 控制台（前后端同一进程）
 python -m reconone scan --domain example.com --profile default   # 纯命令行
-python -m unittest discover -s tests -t .     # 166 项测试（全部本地、不联网）
+python -m unittest discover -s tests -t .     # 177 项测试（全部本地、不联网）
 ```
 
 常用开关（`scan`）：`--no-js` 不下载前端 bundle、`--no-intel` 关闭被动情报、`--geo` 查 IP 地理位置、
 `--cve` 查版本 CVE 线索、`--proxy http://host:port` 指定出口（支持 socks5://）、`--proxy-from-system`
 强制走系统代理、`--direct` 禁止代理（含自动回退）、`--proxy-bypass "localhost,.corp"`；
-另有 `--no-dns`、`--no-graphql`、`--allow-external`、`--out`。
+另有 `--no-verify` / `--verify-max N`（轻量验证）、`--no-dns`、`--no-graphql`、`--allow-external`、`--out`。
 
 **出口（egress）**：默认 `auto` —— 先直连，只有连接级失败（超时/重置/拒绝）才用系统代理重试**一次**，
 并把结果写进 `meta.egress`（mode/type/host/source/fallback_used）。代理若返回 502/503/504，
@@ -119,6 +119,8 @@ python -m reconone ui --host 0.0.0.0                       # 仅在你确知网�
 | **非 JS 端点来源** | 链接、表单 action、robots、sitemap、Wayback 路径，与 JS 结果按路径合并并标 `sources` | `endpoints[source=html-link\|html-form\|robots\|sitemap\|wayback]` |
 | **被动情报** | CT 日志子域（CertSpotter 主 / crt.sh 回退）、Wayback 快照与历史敏感路径、可选 geo 与版本 CVE 线索 | `intel.ct / intel.archive / intel.geo / intel.cve` |
 | **目标画像** | 10 项价值 + 9 项难度规则表 → 价值/难度/机会指数（非概率），逐项标 `passive` / `active`，并给出主动权重占比 | `profile`、`profile.weights` |
+| **轻量验证** | 每个端点一次 `GET`（RoE：方法/上限/排除词 + 作用域守卫双检），可用标红、不可用标灰；被拦下的不发送但留 audit | `verification`、`endpoints[].verified`、`meta.roe` |
+| **TLS 证书** | 与请求走同一出口（直连 / CONNECT / SOCKS5），不再有隐藏直连 | `assets.tls.egress`、`assets.tls` |
 | **主动探测评分** | 只统计本次已经发出的请求：可达端点（`worth.live_surface`）、被拦截比例与 429 次数（`hard.active_blocking`）；不新增任何爆破/模糊测试 | `meta.probe_stats`、`profile.checks` |
 | **子域资产** | CT 子域进入 `assets.subdomains`，逐条标 `source` 与 `probed:false`（只证明签发过证书，不等于扫过） | `assets.subdomains` |
 | **依赖自检** | `python -m reconone doctor` 行为级验证 httpx/anyio/ssl/dns；每次扫描把版本写进报告 | `meta.deps`、CLI 退出码 4 |
@@ -188,7 +190,7 @@ runs/<domain>/
 
 ## 4. 验收标准
 
-完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。21 条验收项由测试断言。当前全仓 **166 tests OK**（`test_pipeline` 68 / `test_concurrency` 11 / `test_web` 16 / `test_intel` 19 / `test_triage` 11 / `test_doctor` 5 / `test_redaction` 20 / `test_egress` 16），`python -m unittest discover -s tests -t .` 可直接复现。
+完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。22 条验收项由测试断言。当前全仓 **177 tests OK**（`test_pipeline` 69 / `test_concurrency` 11 / `test_web` 16 / `test_intel` 19 / `test_triage` 11 / `test_doctor` 5 / `test_redaction` 20 / `test_egress` 16 / `test_verify` 10），`python -m unittest discover -s tests -t .` 可直接复现。
 
 ## 5. 已知限制
 

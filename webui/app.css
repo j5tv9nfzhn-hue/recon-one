@@ -1038,6 +1038,10 @@ a { color: inherit; }
 
 .table tr.is-current { background: var(--accent-wash); }
 .table tr.is-current:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+/* 验证结论：可用=红（左侧强调线 + 文字），不可用=灰（整行降透明度）。 */
+.table tbody tr.is-live td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
+.table tbody tr.is-live td.ep-verdict { color: var(--bad); font-weight: 600; }
+.table tbody tr.is-dead td { opacity: .55; }
 
 .col-s { width: 108px; }
 .col-n { width: 70px; }

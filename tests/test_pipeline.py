@@ -180,6 +180,27 @@ class FixtureScan(unittest.TestCase):
         self.assertEqual(manifest["validation"]["schema_errors"], [])
 
 
+    def test_verification_stage_is_bound_and_recorded(self):
+        """轻量验证：每个端点一次 GET；可用/不可用与 RoE 都要写进报告。"""
+        block = self.data.get("verification") or {}
+        self.assertTrue(block.get("enabled"), "默认应启用验证")
+        summary = block.get("summary") or {}
+        self.assertGreater(summary.get("probed", 0), 0, "fixture 端点应被实际探测")
+        self.assertEqual(summary["requests"], summary["usable"] + summary["unusable"])
+        roe = (self.data.get("meta") or {}).get("roe") or {}
+        self.assertEqual(roe.get("scope_domain"), self.target.lower())
+        self.assertEqual(roe.get("allowed_methods"), ["GET", "HEAD"])
+        self.assertGreaterEqual(roe.get("max_requests", 0), summary["requests"])
+        verdicts = [e.get("verified") for e in self.data["endpoints"]]
+        self.assertTrue(verdicts, "端点列表不应为空")
+        self.assertTrue(all(v in ("usable", "unusable", "skipped") for v in verdicts), verdicts)
+        counts = self.data["coverage"]["counts"]
+        self.assertEqual(counts["verified_usable"], summary["usable"])
+        self.assertEqual(counts["verified_unusable"], summary["unusable"])
+        with open(os.path.join(self.report_dir, "report.md"), encoding="utf-8") as fh:
+            self.assertIn("## 验证", fh.read())
+
+
 class TestOutputLayout(unittest.TestCase):
     """The run directory must never flatten into the runs root or take a package name."""
 

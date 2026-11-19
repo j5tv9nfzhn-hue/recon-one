@@ -339,17 +339,31 @@ def egress_view(session) -> dict:
     return egress.view(fallback_count=getattr(session, "fallback_count", 0),
                        requests=getattr(session, "requests", 0))
 
-def probe_tls_certificate(host: str, port: int = 443, timeout: float = 8.0, verify: bool = True) -> dict:
-    """Separate handshake because http.client does not expose the peer certificate."""
+def probe_tls_certificate(host: str, port: int = 443, timeout: float = 8.0, verify: bool = True,
+                          egress=None) -> dict:
+    """Read the peer certificate — through the run's egress, never as a hidden direct dial.
+
+    `http.client` never exposes the certificate, so this has to open its own TLS socket. It
+    still has to *leave the machine the same way as everything else*: direct, through an HTTP
+    CONNECT tunnel, or through a SOCKS5 tunnel. Otherwise the one field that proves where the
+    target actually lives would be collected over a different route than the report claims.
+    """
     import hashlib
     ctx = ssl.create_default_context()
     if not verify:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-    out: dict = {"host": host, "port": port}
+    proxy = egress.route_for(host) if egress is not None else None
+    out: dict = {"host": host, "port": port,
+                 "egress": ("proxy" if proxy is not None else "direct")}
     sock = None
     try:
-        sock = socket.create_connection((host, port), timeout=timeout)
+        if proxy is None:
+            sock = socket.create_connection((host, port), timeout=timeout)
+        elif proxy.is_socks:
+            sock = egressmod.socks5_tunnel(proxy, host, port, timeout)
+        else:
+            sock = egressmod.http_tunnel(proxy, host, port, timeout)
         with ctx.wrap_socket(sock, server_hostname=host) as tls:
             cert = tls.getpeercert() or {}
             der = tls.getpeercert(binary_form=True) or b""
@@ -365,8 +379,10 @@ def probe_tls_certificate(host: str, port: int = 443, timeout: float = 8.0, veri
             out["der_bytes"] = len(der)
     except ssl.SSLCertVerificationError as exc:
         out["error"] = f"tls_verify: {exc.verify_message or exc}"
-    except (ssl.SSLError, socket.timeout, OSError) as exc:
-        out["error"] = f"tls: {exc}"
+        out["error_kind"] = "tls"
+    except Exception as exc:                        # noqa: BLE001 - classified, never lost
+        out["error"] = f"{Session._kind(exc)}: {exc}"[:200]
+        out["error_kind"] = Session._kind(exc)
     finally:
         if sock is not None:
             try:

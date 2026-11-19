@@ -287,6 +287,32 @@ def socks5_tunnel(proxy: Proxy, target_host: str, target_port: int,
         raise
 
 
+def http_tunnel(proxy: Proxy, host: str, port: int, timeout: float) -> socket.socket:
+    """Open a raw CONNECT tunnel. Used where we need the TLS socket itself (cert probe)."""
+    sock = socket.create_connection((proxy.host, proxy.port), timeout=timeout)
+    try:
+        sock.settimeout(timeout)
+        head = f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+        for name, value in proxy.basic_header().items():
+            head += f"{name}: {value}\r\n"
+        sock.sendall((head + "\r\n").encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise OSError("proxy closed during CONNECT")
+            buf += chunk
+            if len(buf) > 65536:
+                raise OSError("proxy CONNECT reply too large")
+        status = buf.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+        if " 200" not in status:
+            raise OSError(f"proxy CONNECT refused: {status[:80]}")
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
 def tls_wrap(sock: socket.socket, host: str, context: ssl.SSLContext) -> socket.socket:
     return context.wrap_socket(sock, server_hostname=host)
 

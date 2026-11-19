@@ -60,7 +60,7 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 | `redact.py` | 111 | 1 | 第五层兜底脱敏：按形状扫描整份报告（Bearer/JWT/`token=`/凭据键名/任意 URL），并输出可机读的 `meta.redaction` |
 | `egress.py` | 296 | 2 | 出口策略：`--proxy`/系统代理（env + WinINET）/`--direct`/bypass、SOCKS5 握手（自实现，无额外依赖）、`meta.egress` |
 | `config.py` | 199 | 8 | 版本号、**授权声明常量**、三档扫描预算、输出根解析、规则加载（带缓存） |
-| `http.py` | 375 | 3 | 作用域守卫的 HTTP 客户端：代理三路由（直连/CONNECT/绝对 URI/SOCKS5）、失败分类、回退重试、字节/时间预算、手动重定向、解压上限、TLS 证书探测 |
+| `http.py` | 391 | 3 | 作用域守卫的 HTTP 客户端：代理三路由（直连/CONNECT/绝对 URI/SOCKS5）、TLS 证书探测同路由、失败分类、回退重试、预算与解压上限 |
 | `dns.py` | 283 | 1 | 自实现 DNS 线格式（A/AAAA/CNAME/MX/NS/TXT/SOA），校验应答源与 txid，无 dnspython |
 | `concurrency.py` | 170 | 1 | 并发抓取（httpx + anyio，硬依赖）：同序返回、共享字节预算 |
 | `webprobe.py` | 269 | 1 | 首页抓取、安全头按值评分、Cookie 标志、技术指纹、well-known、CORS 实测 |
@@ -69,13 +69,14 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 | `apiprobe.py` | 145 | 1 | OpenAPI/Swagger 发现与解析、GraphQL introspection、参数聚合 |
 | `intel.py` | 381 | 1 | 被动情报：唯一对外网络出口（可注入），CT 子域 / Wayback 存档 / geo / CVE 逐项 status；单次重试 + 分 provider 超时，永不抛 |
 | `triage.py` | 393 | 1 | 目标画像：10 项价值 + 9 项难度规则表（含两项主动实测）、覆盖率门槛、机会指数（非概率）、passive/active 与权重占比 |
+| `verify.py` | 184 | 2 | 轻量验证：每端点一次 GET（RoE 限定方法/上限/排除词），与作用域守卫双检；产出 usable/unusable/skipped + 逐条 audit |
 | `hypotheses.py` | 165 | 1 | 决策层：把事实转成带前置条件、验证步骤、成本与增益的假设 |
 | `score.py` | 782 | 2 | 证据门控评分：18 个原子检查、两轴、覆盖率门槛、triage 规则树 |
-| `report.py` | 787 | 1 | 报告组装、画像注入（`profile`）、子域资产、主动遥测、`meta.egress`、**授权块与五层脱敏**、Schema 校验、markdown/handoff 渲染、manifest |
-| `brief.py` | 385 | 1 | AI 简报：授权行 + 画像摘要 + 按决策价值排序、硬字符预算、显式省略计数 |
+| `report.py` | 846 | 1 | 报告组装、画像注入、子域资产、主动遥测、`meta.egress`/`meta.roe`、验证块、授权块与五层脱敏、Schema 校验、markdown/handoff 渲染 |
+| `brief.py` | 391 | 1 | AI 简报：授权行 + 画像摘要 + 验证结论 + 按决策价值排序、硬字符预算 |
 | `doctor.py` | 148 | 2 | 依赖自检：行为级验证 httpx 客户端、anyio TaskGroup+限流器、DNS 套接字、TLS 校验；不联网 |
-| `cli.py` | 542 | 2 | 参数解析（含 `--authorized-by` / `--proxy` 系列）、出口解析、阶段编排、`doctor` 子命令、授权横幅、事件回调、退出码 |
-| `web.py` | 727 | 2 | 控制台后端：静态资源 + JSON API（统一鉴权）、多目标并行批次（含出口解析）、产物管理、读时重算评分、`/api/compare` |
+| `cli.py` | 570 | 2 | 参数解析（`--authorized-by` / `--proxy` 系列 / `--no-verify`）、出口解析、验证阶段、阶段编排、`doctor`、退出码 |
+| `web.py` | 729 | 2 | 控制台后端：静态资源 + JSON API（统一鉴权）、多目标并行批次（出口/验证透传）、产物管理、读时重算评分、`/api/compare` |
 | `auth.py` | 228 | 1 | 一次性配对令牌、PBKDF2 密码、30 天持久会话（哈希落盘）与失败限流 |
 
 `web.py` 与 `cli.py` 之间是**单向**依赖：控制台不含任何探测逻辑，所以命令行与浏览器产出**字节一致**的报告。
@@ -236,6 +237,18 @@ socks5 走自实现握手（`egress.socks5_tunnel`，不引入 `socksio`）。
 `deterministic_digest`：描述这次运行，不描述目标。
 
 ---
+
+
+### 4.10 轻量验证与 RoE（2026-11）
+扫描产出的是**声明**（这些路径看起来像接口），验证把它变成**证据**：每个端点发一次 `GET`，
+服务端答了就标红（可用），答 404/410 或连不上就标灰（不可用）。没有第二个请求，没有请求体，
+没有重试——一次判定，判不了就标灰并写明原因。
+
+RoE（`verify.RoE`）是这一阶段的机器可读契约：作用域、允许方法（`GET/HEAD`）、请求上限、排除词
+（`logout/delete/reset/…` 这类 GET 也可能有副作用的路径）。每个请求发出前要**同时**通过 RoE 与
+`Session.in_scope()`；被拦下的不发送，但会连同原因写进该端点的 `audit`，所以「没验证」和
+「验证失败」在报告里长得不一样。`meta.roe` 与 `report.verification.summary` 一起构成可追溯记录。
+控制台端点表按 `endpoints[].verified` 上色：可用=红（左侧强调线 + 文字），不可用=灰（整行降透明度）。
 
 ## 5. 产物结构
 

@@ -225,7 +225,8 @@ def probe_web(session, domain: str, scheme: str = "https") -> dict:
     })
 
     if result.get("https_available"):
-        result["tls"] = probe_tls_certificate(domain.split(":")[0], verify=session.verify_tls)
+        result["tls"] = probe_tls_certificate(domain.split(":")[0], verify=session.verify_tls,
+                                              egress=getattr(session, "egress", None))
 
     for path in WELL_KNOWN:
         resp = session.request(f"{scheme}://{domain}{path}", max_bytes=256_000)

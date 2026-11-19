@@ -435,6 +435,7 @@ class Handler(BaseHTTPRequestHandler):
                 bool(body.get("use_js", True)), bool(body.get("use_intel", True)),
                 bool(body.get("geo", False)), bool(body.get("cve", False)),
                 str(body.get("authorized_by") or ""), egress,
+                bool(body.get("verify", True)), int(body.get("verify_max") or 40),
             ))
             job.thread.start()
         self._json(200, {"ok": True, "targets": targets, "parallel": job.parallel,
@@ -443,7 +444,7 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ batch runner
     def _run_batch(self, targets, profile, allow_external, use_dns, use_graphql, verify_tls,
                    use_js=True, use_intel=True, geo=False, cve=False, authorized_by="",
-                   egress=None):
+                   egress=None, use_verify=True, verify_max=40):
         job: Job = self.server.job
         out_root = ensure_dir(os.path.join(self.server.root, "runs"))
 
@@ -482,7 +483,8 @@ class Handler(BaseHTTPRequestHandler):
                     allow_external=allow_external, verify_tls=verify_tls,
                     use_dns=use_dns, use_graphql=use_graphql, quiet=True,
                     use_js=use_js, use_intel=use_intel, geo=geo, cve=cve,
-                    authorized_by=authorized_by, egress=egress,
+                    authorized_by=authorized_by, egress=egress, use_verify=use_verify,
+                    verify_max=verify_max,
                     on_event=lambda ev: on_event(entry, ev), cancel=job.cancel,
                 )
             except cli.ScanCancelled:

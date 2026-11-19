@@ -15,6 +15,7 @@ from . import jsanalyze, report as reportmod
 from . import brief as briefmod
 from . import doctor as doctormod
 from . import intel as intelmod
+from . import verify as verifymod
 from . import webprobe
 from .config import (AUTHORIZED_USE, AUTHORIZED_USE_SHORT, PROFILES, RESERVED_RUN_NAMES,
                      VERSION, ensure_out_dir, find_existing_run, profile as load_profile,
@@ -120,7 +121,8 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
              use_graphql: bool = True, quiet: bool = False,
              on_event=None, cancel=None, use_js: bool = True, use_intel: bool = True,
              geo: bool = False, cve: bool = False, authorized_by: str = "",
-             egress=None) -> tuple[dict, int]:
+             egress=None, use_verify: bool = True,
+             verify_max: int = verifymod.DEFAULT_MAX_REQUESTS) -> tuple[dict, int]:
     """Run every probe once. `on_event` receives stage dicts; `cancel` is polled between stages.
 
     `use_js=False` skips bundle download + JS analysis entirely: endpoints then come from
@@ -162,7 +164,7 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
     # per stage sits at 50% for the whole scan and teaches the user to ignore it.
     STAGE_PLAN = [
         ("start", 2), ("dns", 5), ("web", 10), ("intel", 8), ("crawl", 26),
-        ("js", 24), ("api", 8), ("analyze", 9), ("report", 8),
+        ("js", 24), ("api", 8), ("verify", 6), ("analyze", 9), ("report", 8),
     ]
     stage_done = 0.0
     total_weight = sum(w for _, w in STAGE_PLAN) or 1
@@ -248,7 +250,10 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
             web=web, dns=dns_result, crawl_result={}, js={}, api={}, findings=[], hyp=[],
             session=session, started_at=started_at, elapsed=time.time() - clock,
             probe_status={**status, "crawl": "skipped", "js": "skipped", "api": "skipped"},
-            intel=intel, authorized_by=authorized_by,
+        intel=intel, authorized_by=authorized_by,
+        verification=verifymod.run(session, f"https://{domain}/", [],
+                                   verifymod.build_roe(domain, allow_external, 0, enabled=False,
+                                                       source="skipped:unreachable")),
         )
         reportmod.write_all(report, out_dir)
         return report, 3
@@ -308,6 +313,23 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
     web["cors"] = webprobe.probe_cors(session, root_url, sample_paths)
     status["cors"] = "ok"
 
+    # ---- light verification: one GET per endpoint, bound by RoE + scope guard ----------
+    # Runs last, after every endpoint source has landed, because it must see the final list.
+    verify_targets = list(js.get("endpoints") or [])
+    for spec in api.get("specs") or []:
+        verify_targets.extend(spec.get("endpoints") or [])
+    roe = verifymod.build_roe(domain, allow_external=allow_external, max_requests=verify_max,
+                              enabled=use_verify,
+                              source=("cli:--verify" if use_verify else "cli:--no-verify"))
+    verification = verifymod.run(session, root_url, verify_targets, roe)
+    verifymod.annotate(verify_targets, verification)
+    summary = verification.get("summary") or {}
+    status["verify"] = ("skipped" if not use_verify else
+                        ("ok" if summary.get("probed") else "empty"))
+    emit("verify", f"验证：可用 {summary.get('usable', 0)} / 不可用 {summary.get('unusable', 0)}"
+                   f" / 跳过 {summary.get('skipped', 0)}（请求 {summary.get('requests', 0)}"
+                   f"/{summary.get('max_requests', 0)}）")
+
     findings = reportmod.derive_findings(web, js, api, dns_result)
     sourcemaps = [s["sourcemap"] for s in js.get("scripts", []) if s.get("sourcemap")]
     hyp = hypotheses.build({
@@ -330,7 +352,7 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
         domain=domain, root_url=root_url, profile_name=profile_name, limits=limits, web=web,
         dns=dns_result, crawl_result=crawl_result, js=js, api=api, findings=findings, hyp=hyp,
         session=session, started_at=started_at, elapsed=time.time() - clock, probe_status=status,
-        intel=intel, authorized_by=authorized_by,
+        intel=intel, authorized_by=authorized_by, verification=verification,
     )
     # The AI-facing brief lives beside the machine report so a task description can be
     # pasted from a file instead of reassembled by hand every time. Write it *before*
@@ -397,7 +419,9 @@ def cmd_scan(args) -> int:
                             use_dns=not args.no_dns, use_graphql=not args.no_graphql,
                             quiet=args.quiet, use_js=not args.no_js,
                             use_intel=not args.no_intel, geo=args.geo, cve=args.cve,
-                            authorized_by=getattr(args, "authorized_by", ""), egress=egress)
+                            authorized_by=getattr(args, "authorized_by", ""), egress=egress,
+                            use_verify=not getattr(args, "no_verify", False),
+                            verify_max=getattr(args, "verify_max", verifymod.DEFAULT_MAX_REQUESTS))
     if args.json:
         print(json.dumps({"exit_code": code, "counts": report["coverage"]["counts"],
                           "hypotheses": report["hypotheses"][:5]}, ensure_ascii=False))
@@ -497,6 +521,10 @@ def build_parser() -> argparse.ArgumentParser:
                            "forms, robots, sitemap and the archive instead")
     scan.add_argument("--no-intel", action="store_true",
                       help="skip passive third-party lookups (CT logs, web archive)")
+    scan.add_argument("--no-verify", action="store_true",
+                      help="skip the light verification stage (endpoints stay unverified claims)")
+    scan.add_argument("--verify-max", type=int, default=verifymod.DEFAULT_MAX_REQUESTS,
+                      help="hard cap of verification requests; one GET per endpoint, RoE-bound")
     scan.add_argument("--geo", action="store_true",
                       help="look up the resolved IP's location via ip-api.com (sends the IP to a third party)")
     scan.add_argument("--cve", action="store_true",
