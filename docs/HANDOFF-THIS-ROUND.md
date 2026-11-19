@@ -115,7 +115,8 @@ recon-one/
 | `tests/test_verify.py` | 17 | 验证 v2：可用/不可用判定、破坏性动词按词边界跳过（`/applications` 不被误伤）、预算上限、越界被拦并记录、禁用时零请求、只发 HEAD/GET 绝无 POST、HEAD 被拒补一次 GET、**双身份授权差分**（gated / anonymous_open / same）、单身份不假装做过差分、TLS 证书探测走 CONNECT |
 | `tests/test_session.py` | 34 | 会话注入到达服务端（含重定向）、注入头大小写无关覆盖、`describe()` 不含凭据值且裸 Cookie 只计数、`secrets()` 只登记 ≥6 字符值并按长度降序、`RECONONE_*`、`--header` 语法校验、逐 host 独立限速、`Retry-After` 与指数退避封顶、成功重置、等待上限与预算收缩、真实 429 退避、整包产物零凭据 |
 | `tests/test_cookies.py` | 23 | Set-Cookie 会话保持三层：jar 规则（`Domain`/`Path`/`Secure`/过期/删除/上限、`.com` 与跨域声明拒收、IP 目标不接受 `Domain`、头部顺序稳定）、接线（第二跳自动带 cookie、`--cookie` 同名优先、只发一个 `Cookie` 头、关闭后不发）、端到端（`/app/inner` 由 401 变 200、`meta.session.cookies` 只有名称与计数、整包无 cookie 值、markdown 声明、`use_cookies=False`） |
-| **合计** | **267** | `python -m unittest discover -s tests -t .` 全绿（约 105s） |
+| `tests/test_subdomains.py` | 19 | 子域探活：判定表（401/403、非公开标题、正文登录墙 = 暴露；营销页/连不上 = 非证据）、作用域（只认目标及其真子域、带端口目标仍算在范围内、越界只记录不发请求、主机数封顶）、探活（https 传输层失败补一次 http、公开主机只花一个请求、`stats()` 只有标签计数）、真实 socket 靶站（纯 HTTP 主机也能被发现并分类）、判决接线（**观测压过 IP 默认**、公开页=miss 而非 unknown）、`_subdomain_assets` 声明与观测合并且 `probed:false` 仅在没探时出现 |
+| **合计** | **286** | `python -m unittest discover -s tests -t .` 全绿（约 120s） |
 
 新增的关键回归：
 
@@ -309,4 +310,45 @@ report.md: - 判决：**不值**（阈值 A，置信度 medium，身份模型 an
 回归：`test_pipeline.py::TestStaticSiteIsJudgedNotWorth`（3 项：站点确实是静态的、判决是
 `not_worth`、markdown 写「不值」且不出现「值得打」）+ `test_triage.py` 的
 `test_unprobed_subdomains_cannot_block_a_negative` / `test_a_thin_scan_refuses_to_say_not_worth`
-/ `test_an_ip_target_has_no_subdomain_dimension`。全量 **267 tests OK**。
+/ `test_an_ip_target_has_no_subdomain_dimension`。（当时）全量 **267 tests OK**；补上子域探活后为 **286**（见 6.6）。
+
+### 6.6 第二颗牙：子域探活，让判据二不再是 unknown（2026-11）
+
+6.5 留下的 `unknown` 是结构性缺口：CT 只告诉我们"证书上写了这些名字"，而判决却把声明当成事实，
+于是既有名字、没敲门的子域一律 `unknown`。这一轮把声明变成观测。
+
+做法（`reconone/subs.py`，170 行）：
+
+1. **作用域先于请求。** `in_scope(name, target)` 只接受目标本身或其真子域——异域、超域
+   （`api.example.com.evil.tld`、`example.com.attacker.net`）只进 `skipped_out_of_scope`，
+   一个包都不发。带端口的目标（`example.com:8443`）先剥端口再判，否则整批名字会被误判越界
+   （这是本轮修掉的真 bug）。
+2. **每个候选一次 `GET /`，只有一个例外**：`https` 在**传输层**失败时补一次 `http`
+   （很多内网面板不开 443）。HTTP 状态码错误不回退——那是目标的选择，不是我们该绕的。
+3. **判定表 → 证据，不给分数**：`gated`（401/403）、`exposed`（非公开面：`internal`/`admin`/`console`
+   类主机名或标题、正文登录墙）、`public`（公开页）、`dead`（连不上/无响应）。只有 `exposed` 和 `gated`
+   算"暴露的非公开面"。
+4. **成本显式**：`DEFAULT_MAX_HOSTS = 20`；`--subdomain-max` 调上限，`--no-subdomains` 整段跳过；
+   `meta.subdomains` 只有 `candidates/probed/live/non_public/skipped_out_of_scope/probed_this_run` 计数。
+5. **观测压过结构性默认**：`triage.bet()` 的判据二先看观测，探到存活且暴露的子域就 `hit`（即使目标是
+   IP）；探到只说明面更大，没探到仍然不能否决 `not_worth`（6.5 的规则不回退）。
+
+接线实测（stub CT 给一个 `admin.<target>` + 本地靶站返回「Internal Admin Console」）：
+
+```
+assets.subdomains[0]: {host: 'admin.…', probed: true, status: 200,
+                       title: 'Internal Admin Console', label: 'exposed', non_public: true}
+meta.subdomains: {candidates: 1, probed: 1, live: 1, non_public: 1,
+                  skipped_out_of_scope: 0, probed_this_run: true}
+bet.criteria[1]: {rule: 'live_subdomain_nonpublic', status: 'hit',
+                  detail: '1 个存活子域已探测，其中 1 个暴露非公开面'}
+```
+
+即：同一份报告里"证书说存在"（`probed:false`）与"我们敲过门"（`probed:true` + 状态 + 标题）不会混成
+一句话；判据二从恒定 `unknown` 变成可命中的观测。
+
+回归：`tests/test_subdomains.py`（19 项，`ACCEPTANCE.md` AC27），其中 `TestProbeOverASocket` 起真实
+`socketserver` 靶站，证明纯 HTTP 主机也会被发现并分类，不是只测桩。全量 **286 tests OK**。
+
+下一颗牙（未做）：**定向内容发现**——用 JS 前缀 + 技术栈路径 + 404 基线收敛 50–200 条候选，
+仍然不做全量字典。

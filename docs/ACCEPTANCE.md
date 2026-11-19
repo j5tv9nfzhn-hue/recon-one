@@ -1,14 +1,15 @@
 # 验收标准
 
-26 条验收项由 `tests/test_pipeline.py`（AC1–AC15、AC25–AC26）、`tests/test_triage.py`（AC16–AC17）、`tests/test_doctor.py`（AC18）、`tests/test_web.py`（AC19）、`tests/test_redaction.py`（AC20）、`tests/test_egress.py`（AC21）、`tests/test_verify.py`（AC22）、`tests/test_session.py`（AC23）与 `tests/test_cookies.py`（AC24）自动断言；运行：
+27 条验收项由 `tests/test_pipeline.py`（AC1–AC15、AC25–AC26）、`tests/test_subdomains.py`（AC27）、`tests/test_triage.py`（AC16–AC17）、`tests/test_doctor.py`（AC18）、`tests/test_web.py`（AC19）、`tests/test_redaction.py`（AC20）、`tests/test_egress.py`（AC21）、`tests/test_verify.py`（AC22）、`tests/test_session.py`（AC23）与 `tests/test_cookies.py`（AC24）自动断言；运行：
 
 ```powershell
 python -m unittest discover -s tests -t .
 ```
 
-当前结果：**267 tests OK**（`test_pipeline.py` 75 / `test_concurrency.py` 11 / `test_web.py` 17 /
+当前结果：**286 tests OK**（`test_pipeline.py` 75 / `test_concurrency.py` 11 / `test_web.py` 17 /
 `test_intel.py` 19 / `test_triage.py` 22 / `test_doctor.py` 5 / `test_redaction.py` 28 /
-`test_egress.py` 16 / `test_verify.py` 17 / `test_session.py` 34 / `test_cookies.py` 23），全部走本地靶站或纯函数，不访问公网。
+`test_egress.py` 16 / `test_verify.py` 17 / `test_session.py` 34 / `test_cookies.py` 23 /
+`test_subdomains.py` 19），全部走本地靶站或纯函数，不访问公网。
 
 ## 验收矩阵
 
@@ -40,6 +41,7 @@ python -m unittest discover -s tests -t .
 | AC24 | Set-Cookie 会话保持：`Domain`/`Path`/`Secure`/`Max-Age` 按 RFC 6265 子集收发，`Max-Age=0` 即删除；**`Domain` 只接受目标或其子域**（`.com` 拒收并计数）；`--cookie` 的同名值优先于 jar；第二跳请求自动带上第一跳拿到的会话（`/app` 由 401 变 200）；`meta.session.cookies` 只记计数与名称，整包文件搜不到任何 cookie 值；`--no-cookies` 关闭 | `test_cookies.py`（23 项） |
 | AC25 | 请求台账：`report/requests.jsonl` 逐行记录本次真正发出的每个请求（`n/method/url/status/egress/error`，URL 已脱敏、**不含时间与耗时**），按 `(method,url,status,error)` 排序后编号，因此同目标两次扫描字节一致；该文件进入 `manifest.json` 且带真实 sha256（非 `redacted`）；GraphQL introspection 的 POST 也必须出现在台账里 | `test_pipeline.py::FixtureScan::test_ac25_request_ledger_is_complete_and_listed` / `test_ac14_determinism` |
 | AC26 | 下注判决（阈值 A）：`report.bet` 给出 `verdict ∈ {worth, not_worth, withheld}` + `confidence` + 两条判据 + 计数 + `evidence` + `kill_criteria` + `unknowns`；匿名扫描时"可用且带参数"即命中，注入身份后必须由**授权差分**（anon 2xx）证明；**判据一独占否决权**（明确未命中 + 验证跑过 + 未截断 → `not_worth`），判据二只能升级为 `worth`、不能把 `not_worth` 压成 `withheld`；`withheld` 仅当判据一判不了或扫描被截断；**纯公开静态站必须判 `not_worth`**；markdown 以「## 下注判决」领起，两次扫描同输入同输出 | `test_pipeline.py::TestStaticSiteIsJudgedNotWorth`（3 项）/ `test_ac26_bet_sheet_leads_the_report` / `test_ac26_bet_is_stable_across_identical_scans` / `test_triage.py::TestBet`（11 项） |
+| AC27 | 子域探活：CT 名字逐个发一次 `GET /`（`https` **传输层**失败补一次 `http`，状态码错误不回退），判定 `gated`/`exposed`/`public`/`dead` 并写进 `assets.subdomains` 的同一行（`probed`/`status`/`title`/`label`/`non_public`）；**作用域先于请求**——异域或超域名字只进 `meta.subdomains.skipped_out_of_scope`，一个包都不发；主机数受 `DEFAULT_MAX_HOSTS=20`/`--subdomain-max` 约束，`--no-subdomains` 整段跳过；**观测压过结构性默认**：探到存活且暴露的子域即 `hit`（即使目标是 IP），没探到只算 `miss`/`unknown`、不构成否决；`meta.subdomains` 只有计数 | `test_subdomains.py::TestClassification`（5 项）/ `TestScope`（2 项）/ `TestProbe`（5 项）/ `TestProbeOverASocket`（2 项）/ `TestBetReadsTheObservation`（4 项）/ `TestReportMerge`（2 项） |
 
 > AC13 的「必备小节」由测试断言为 3 个（已确认事实 / 未覆盖项 / 建议动作）；`handoff.md` 实际含 5 节，
 > 停机条件在第 4 节。文档与断言以**测试**为准。
@@ -76,6 +78,7 @@ Cookie/Bearer/ApiKey 的靶站，先证明服务端确实收到了（否则会�
 接线（第二跳自动带 cookie、`--cookie` 同名值优先、只发一个 `Cookie` 头、jar 关闭后不发），
 以及端到端（只对持 cookie 者开放的 `/app/inner` 必须 200、`meta.session.cookies` 只有名称与计数、
 整包文件无 cookie 值、markdown 写明会话保持、`use_cookies=False` 时不存不发）。
+`test_subdomains.py` 覆盖子域探活的三段：判定表（401/403 与非公开标题算"暴露"、营销页不算证据、连不上不算证据、正文登录墙算 gated）、作用域（只认目标及其真子域、带端口的 `example.com:8443` 仍把子域算在范围内、越界名字只记录不发请求、主机数封顶）、以及观测如何进入判决（探到非公开 → `worth`；探到公开页 → `miss` 而非 `unknown`；没探到 → 仍 `unknown`；**IP 目标的默认被观测压过**）。`TestProbeOverASocket` 真的起一个 `socketserver` 靶站，证明"纯 HTTP 主机也会被发现并分类"，不是只测桩。
 
 ## 端到端冒烟（非自动，人工执行）
 

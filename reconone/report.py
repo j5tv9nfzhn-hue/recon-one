@@ -184,26 +184,36 @@ def _score_endpoints(endpoints: list[dict]) -> list[dict]:
     return sorted(out, key=_testability)
 
 
-def _subdomain_assets(intel: dict | None) -> list[dict]:
-    """CT-discovered hosts as first-class assets, with `probed: false` on every entry.
+def _subdomain_assets(intel: dict | None, probe_rows=None) -> list[dict]:
+    """CT-discovered hosts, plus what each one answered when it was probed.
 
-    They are deliberately *not* scanned: the tool's contract is one host per run, and
-    probing every certificate name would turn a recon pass into a list-wide scan. Listing
-    them means an operator sees the real surface and can decide, instead of the subdomain
-    count being a number with no source behind it.
+    The certificate is the *claim*; `probed` says whether anyone checked it. Keeping both on the
+    same row is what lets the bet sheet answer "is there a live host exposing a non-public face"
+    instead of reporting `unknown` forever.
     """
     ct = ((intel or {}).get("ct") or {})
-    if ct.get("status") != "ok":
-        return []
-    source = ct.get("source", "ct")
-    out = []
-    for host in ct.get("subdomains") or []:
-        host = str(host or "").strip()
-        if not host:
-            continue
-        out.append({"host": host, "url": f"https://{host}/", "source": source,
-                    "passive": True, "probed": False,
-                    "first_cert": ct.get("first_cert", ""), "last_cert": ct.get("last_cert", "")})
+    observed = {str(row.get("host") or "").strip().lower(): row
+                for row in (probe_rows or [])}
+    out: list[dict] = []
+    if ct.get("status") == "ok":
+        source = ct.get("source", "ct")
+        for raw in ct.get("subdomains") or []:
+            host = str(raw or "").strip()
+            if not host:
+                continue
+            row = {"host": host, "url": f"https://{host}/", "source": source,
+                   "passive": True, "probed": False,
+                   "first_cert": ct.get("first_cert", ""), "last_cert": ct.get("last_cert", "")}
+            seen = observed.pop(host.lower(), None)
+            if seen:
+                for key in ("url", "probed", "status", "title", "label", "non_public",
+                            "skipped", "error"):
+                    if key in seen:
+                        row[key] = seen[key]
+            out.append(row)
+    # Hosts that were probed but that CT did not list (a caller may pass its own list).
+    for row in observed.values():
+        out.append(dict(row, passive=False))
     return out
 
 
@@ -269,15 +279,14 @@ def _scrub_hypothesis(item: dict) -> dict:
             out[key] = scrub_header_block(out[key])
     return scrub_urls(out)
 
-
 def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, js, api,
              findings, hyp, session, started_at, elapsed, probe_status,
              intel: dict | None = None, authorized_by: str = "",
-             verification: dict | None = None) -> dict:
+             verification: dict | None = None, subdomain_probe=None) -> dict:
     sourcemaps = [s["sourcemap"] for s in js.get("scripts", []) if s.get("sourcemap")]
     # Passive assets and active-probe telemetry are computed once, here, so every consumer
     # (markdown, brief, console, compare view) reads the same numbers.
-    subdomains = _subdomain_assets(intel)
+    subdomains = _subdomain_assets(intel, subdomain_probe)
     probe_stats = _probe_stats(session, js)
     deps = doctormod.versions()
     assets = {
@@ -340,6 +349,18 @@ def assemble(*, domain, root_url, profile_name, limits, web, dns, crawl_result, 
             "scope_blocks": len(session.off_scope_attempts),
             "deps": deps,
             "probe_stats": probe_stats,
+            # What the subdomain half of the bet actually observed. Without this, "unknown"
+            # and "we looked and there was nothing" look the same in the report.
+            "subdomains": {
+                "candidates": len(subdomains),
+                "probed": sum(1 for sub in subdomains if sub.get("probed")),
+                "live": sum(1 for sub in subdomains if sub.get("probed")
+                            and 200 <= int(sub.get("status") or 0) < 400),
+                "non_public": sum(1 for sub in subdomains if sub.get("non_public")),
+                "skipped_out_of_scope": sum(1 for sub in subdomains
+                                            if sub.get("skipped") == "out_of_scope"),
+                "probed_this_run": subdomain_probe is not None,
+            },
             "redaction": redactmod.scope_note(),
             "egress": httpmod.egress_view(session),
             # The rules this run played by, and what they stopped. Present even when the

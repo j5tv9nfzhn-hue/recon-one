@@ -68,17 +68,18 @@ import，缺失时启动阶段即报错并给出安装命令）。无 Docker、�
 | `jsanalyze.py` | 520 | 1 | 前端 JS 静态分析：端点/参数/密钥/主机/source map；`from_paths()` 提供非 JS 来源 |
 | `apiprobe.py` | 145 | 1 | OpenAPI/Swagger 发现与解析、GraphQL introspection、参数聚合 |
 | `intel.py` | 381 | 1 | 被动情报：唯一对外网络出口（可注入），CT 子域 / Wayback 存档 / geo / CVE 逐项 status；单次重试 + 分 provider 超时，永不抛 |
-| `triage.py` | 515 | 2 | 目标画像：10 项价值 + 9 项难度规则表（含两项主动实测）、覆盖率门槛、机会指数（非概率）、passive/active 与权重占比；**下注判决 `bet()`**（阈值 A：匿名可访问且带参数 / 存活子域暴露非公开面，三态） |
+| `triage.py` | 569 | 2 | 目标画像：10 项价值 + 9 项难度规则表（含两项主动实测）、覆盖率门槛、机会指数（非概率）、passive/active 与权重占比；**下注判决 `bet()`**（阈值 A，三态；判据二只能升级不能否决，观测压过 IP 默认值） |
 | `verify.py` | 309 | 2 | 验证 v2：单身份 `HEAD` 判存在（405/501 补一次 GET）、双身份两次 `GET` 做**授权差分**（anon/authed 状态 + 长度/标题差异 → `gated`/`anonymous_open`/`same`）；RoE 方法/上限 + 作用域守卫双检，破坏性动词按词边界跳过 |
 | `inject.py` | 177 | 2 | 会话注入：`--cookie/--bearer/--header` 与 `RECONONE_*` 合成不可变头表；`describe()` 只暴露头名与 Cookie 键名（无键片段只计数），`secrets()` 仅供脱敏层按值遮蔽，值永不进报告 |
 | `rate.py` | 120 | 2 | 逐 host 限速与退避：`1/rate` 间隔、429/503 → `Retry-After` 或指数退避（0.5→8s 封顶）、单次等待上限、`stats()` 记账 |
 | `cookiejar.py` | 251 | 2 | Set-Cookie 会话保持（RFC 6265 实用子集）：`Domain`/`Path` 作用域、`Secure` 双向校验、`Max-Age`/`Expires`/删除、上限淘汰；**只接受目标或其子域的 Domain**，`stats()` 只给名称与计数 |
+| `subs.py` | 170 | 2 | 子域探活：CT 名字逐个 `GET /`（HTTPS 传输层失败回退一次 HTTP）、`gated`/`exposed`/`public`/`dead` 判定表、**只探目标或其子域**（越界记录不发请求）、主机数上限；`stats()` 只给计数 |
 | `hypotheses.py` | 165 | 1 | 决策层：把事实转成带前置条件、验证步骤、成本与增益的假设 |
 | `score.py` | 782 | 2 | 证据门控评分：18 个原子检查、两轴、覆盖率门槛、triage 规则树 |
-| `report.py` | 1007 | 1 | 报告组装、画像注入、**下注判决块**、子域资产、主动遥测、`meta.egress`/`meta.roe`/`meta.session`（含 `cookies`）/`meta.rate`、**请求台账 `requests.jsonl`**、验证块、会话与速率摘要、授权块与五层脱敏（含发出凭据的值级遮蔽）、Schema 校验、markdown/handoff 渲染 |
+| `report.py` | 1028 | 1 | 报告组装、画像注入、**下注判决块**、子域资产（证书声明 + 探活观测合一行）、主动遥测、`meta.egress`/`meta.roe`/`meta.session`（含 `cookies`）/`meta.rate`/`meta.subdomains`、**请求台账 `requests.jsonl`**、验证块、会话与速率摘要、授权块与五层脱敏（含发出凭据的值级遮蔽）、Schema 校验、markdown/handoff 渲染 |
 | `brief.py` | 404 | 1 | AI 简报：授权行 + 画像摘要 + 验证结论 + 会话/速率行 + 按决策价值排序、硬字符预算 |
 | `doctor.py` | 148 | 2 | 依赖自检：行为级验证 httpx 客户端、anyio TaskGroup+限流器、DNS 套接字、TLS 校验；不联网 |
-| `cli.py` | 615 | 2 | 参数解析（`--authorized-by` / `--proxy` 系列 / `--no-verify` / `--cookie` / `--bearer` / `--header` / `--rate` / `--max-backoff` / `--no-cookies`）、出口解析、会话装配（注入 + jar + **匿名对照 session**）、验证阶段、阶段编排、`doctor`、退出码 |
+| `cli.py` | 638 | 2 | 参数解析（`--authorized-by` / `--proxy` 系列 / `--no-verify` / `--cookie` / `--bearer` / `--header` / `--rate` / `--max-backoff` / `--no-cookies` / `--no-subdomains` / `--subdomain-max`）、出口解析、会话装配（注入 + jar + **匿名对照 session**）、**子域探活阶段**、验证阶段、阶段编排、`doctor`、退出码 |
 | `web.py` | 738 | 2 | 控制台后端：静态资源 + JSON API（统一鉴权）、多目标并行批次（出口/验证/会话/速率/`use_cookies` 透传）、产物管理、读时重算评分、`/api/compare` |
 | `auth.py` | 228 | 1 | 一次性配对令牌、PBKDF2 密码、30 天持久会话（哈希落盘）与失败限流 |
 
@@ -334,6 +335,26 @@ cookie」的站点我们不发（会少一些发现），收益是绝不会把�
 验证侧 v2 的取法：单身份用 `HEAD`（更便宜、无响应体），405/501 时补一次 `GET`；双身份用两次 `GET`。
 破坏性动词按**词边界**匹配（`/applications` 不会被 `apply` 误伤），每次请求都受 `RoE.max_requests`
 与作用域守卫约束，`audit` 里逐条记录用了几个请求、还剩几个。
+
+### 4.14 子域探活：让判据二不再是 unknown（2026-11）
+
+CT 只给"证书上写了这些名字"，那是声明，不是事实。`subs.py` 把声明变成观测：每个候选主机发一次
+`GET /`（`https` 传输层失败时补一次 `http`，HTTP 状态码错误不回退——那是目标的选择，不是我们该绕的），
+按状态码、标题、跳转落点给判定：`exposed`（非公开面：登录页、内网控制台、后台）、`gated`（401/403）、
+`public`（公开页）、`dead`（连不上/无响应）。
+
+**作用域先于请求。** 候选里出现 `api.example.com.evil.tld` 或完全异域的名字时，只写进
+`meta.subdomains.skipped_out_of_scope`，一个包都不发——子域探活最容易变成 confused deputy，
+宁可少测。域名匹配从严：只接受目标本身或其真子域，`Domain=com` 这类超域值一律拒收。
+
+**观测压过结构性默认。** 早期判据二读的是"目标是不是 IP / CT 有没有子域"这类结构信号，IP 目标因此
+永远是 `unknown`。现在只要探到**存活且暴露**的子域就记 `hit`，即使目标本体是个 IP；
+探到只说明面更大，没探到不构成否决（见 4.13）。
+
+成本是显式的：`DEFAULT_MAX_HOSTS = 20`，`--subdomain-max` 可调，`--no-subdomains` 整段跳过；
+`meta.subdomains` 记 `candidates` / `probed` / `live` / `non_public` / `skipped_out_of_scope` /
+`probed_this_run`，全部是计数，不给"风险分"。`report._subdomain_assets()` 把证书声明与本次观测
+合并成 `assets.subdomains`，同一次运行里"证书说存在"和"我们敲过门"不会混成一句话。
 
 ## 5. 产物结构
 

@@ -18,6 +18,7 @@ from . import doctor as doctormod
 from . import inject as injectmod
 from . import intel as intelmod
 from . import rate as ratemod
+from . import subs as subsmod
 from . import verify as verifymod
 from . import webprobe
 from .config import (AUTHORIZED_USE, AUTHORIZED_USE_SHORT, PROFILES, RESERVED_RUN_NAMES,
@@ -128,7 +129,8 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
              verify_max: int = verifymod.DEFAULT_MAX_REQUESTS,
              cookie: str = "", bearer: str = "", headers=(), rate: float = 0.0,
              max_backoff: float = 8.0, injection_source: str = "cli",
-             use_cookies: bool = True) -> tuple[dict, int]:
+             use_cookies: bool = True, probe_subdomains: bool = True,
+             subdomain_max: int = 0) -> tuple[dict, int]:
     """Run every probe once. `on_event` receives stage dicts; `cancel` is polled between stages.
 
     `use_js=False` skips bundle download + JS analysis entirely: endpoints then come from
@@ -253,6 +255,20 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
                  "providers": {}}
         status["intel"] = "skipped"
         emit("intel", "被动情报已跳过：" + reason)
+
+    # Criterion 2 needs an observation, not a certificate: probe the CT names we are allowed to
+    # touch — one GET each, through the same scope guard, limiter, egress and cookie jar.
+    subdomain_probe = None
+    ct_hosts = list((intel.get("ct") or {}).get("subdomains") or [])
+    if probe_subdomains and ct_hosts:
+        cap = int(subdomain_max or (40 if limits.get("include_subdomains")
+                                    else subsmod.DEFAULT_MAX_HOSTS))
+        emit("subdomain", f"子域探活：{len(ct_hosts)} 个候选，上限 {cap}")
+        subdomain_probe = subsmod.probe(session, ct_hosts, domain, max_hosts=cap)
+        answered = sum(1 for row in subdomain_probe if row.get("probed"))
+        non_public = sum(1 for row in subdomain_probe if row.get("non_public"))
+        emit("subdomain", f"子域探活：应答 {answered}，非公开面 {non_public}"
+                          f"（越界跳过 {sum(1 for row in subdomain_probe if row.get('skipped'))}）")
 
     if not web.get("reachable"):
         emit("fail", "目标不可达，写出空报告")
@@ -381,6 +397,7 @@ def run_scan(domain: str, out_dir: str, profile_name: str = "default", overrides
         dns=dns_result, crawl_result=crawl_result, js=js, api=api, findings=findings, hyp=hyp,
         session=session, started_at=started_at, elapsed=time.time() - clock, probe_status=status,
         intel=intel, authorized_by=authorized_by, verification=verification,
+        subdomain_probe=subdomain_probe,
     )
     # The AI-facing brief lives beside the machine report so a task description can be
     # pasted from a file instead of reassembled by hand every time. Write it *before*
@@ -454,6 +471,8 @@ def cmd_scan(args) -> int:
                             max_backoff=getattr(args, "max_backoff", 8.0),
                             use_verify=not getattr(args, "no_verify", False),
                             use_cookies=not getattr(args, "no_cookies", False),
+                            probe_subdomains=not getattr(args, "no_subdomains", False),
+                            subdomain_max=int(getattr(args, "subdomain_max", 0) or 0),
                             verify_max=getattr(args, "verify_max", verifymod.DEFAULT_MAX_REQUESTS))
     if args.json:
         print(json.dumps({"exit_code": code, "counts": report["coverage"]["counts"],
@@ -570,6 +589,10 @@ def build_parser() -> argparse.ArgumentParser:
                       help="cap for the per-host throttle backoff in seconds")
     scan.add_argument("--no-cookies", action="store_true",
                       help="do not persist Set-Cookie: every request goes out without the jar")
+    scan.add_argument("--no-subdomains", action="store_true",
+                      help="skip subdomain liveness probing（判据二会保持 unknown）")
+    scan.add_argument("--subdomain-max", type=int, default=0, metavar="N",
+                      help="max CT hosts to probe for liveness (0 = profile default: 20, deep: 40)")
     scan.add_argument("--geo", action="store_true",
                       help="look up the resolved IP's location via ip-api.com (sends the IP to a third party)")
     scan.add_argument("--cve", action="store_true",

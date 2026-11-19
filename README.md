@@ -36,7 +36,7 @@ cd recon-one
 python -m reconone doctor                     # 先确认 httpx/anyio/ssl/dns 真的能用（1 秒，不联网）
 python -m reconone ui                         # 启动 Web 控制台（前后端同一进程）
 python -m reconone scan --domain example.com --profile default   # 纯命令行
-python -m unittest discover -s tests -t .     # 267 项测试（全部本地、不联网）
+python -m unittest discover -s tests -t .     # 286 项测试（全部本地、不联网）
 ```
 
 常用开关（`scan`）：`--no-js` 不下载前端 bundle、`--no-intel` 关闭被动情报、`--geo` 查 IP 地理位置、
@@ -44,8 +44,8 @@ python -m unittest discover -s tests -t .     # 267 项测试（全部本地、�
 强制走系统代理、`--direct` 禁止代理（含自动回退）、`--proxy-bypass "localhost,.corp"`；
 另有 `--no-verify` / `--verify-max N`（轻量验证）、`--no-dns`、`--no-graphql`、`--allow-external`、`--out`。
 需要登录态时：`--cookie "sid=…"`、`--bearer <token>`、`--header "X-Api-Key: …"`（可重复）；
-`--no-cookies` 关闭 Set-Cookie 会话保持；限速与退避：`--rate N`（每 host 每秒上限，默认 0=不限）、
-`--max-backoff S`（默认 8）。
+`--no-cookies` 关闭 Set-Cookie 会话保持；`--no-subdomains` 关闭子域探活（`--subdomain-max N` 调上限）；
+限速与退避：`--rate N`（每 host 每秒上限，默认 0=不限）、`--max-backoff S`（默认 8）。
 
 **出口（egress）**：默认 `auto` —— 先直连，只有连接级失败（超时/重置/拒绝）才用系统代理重试**一次**，
 并把结果写进 `meta.egress`（mode/type/host/source/fallback_used）。代理若返回 502/503/504，
@@ -149,7 +149,7 @@ python -m reconone ui --host 0.0.0.0                       # 仅在你确知网�
 | **主动探测评分** | 只统计本次已经发出的请求：可达端点（`worth.live_surface`）、被拦截比例与 429 次数（`hard.active_blocking`）；不新增任何爆破/模糊测试 | `meta.probe_stats`、`profile.checks` |
 | **会话与限速** | 凭据按形状记录（头名/Cookie 键名/是否 Bearer，值不入盘）、每 host 独立限速、429/503 按 `Retry-After` 或指数退避 | `meta.session`、`meta.rate` |
 | **Set-Cookie 会话保持** | 记住站点下发的会话 cookie 并带回后续请求；`Domain` 只接受目标或其子域（`.com` 直接拒收）、`Secure` 双向校验、`Max-Age`/`Expires` 与删除语义 | `meta.session.cookies` |
-| **子域资产** | CT 子域进入 `assets.subdomains`，逐条标 `source` 与 `probed:false`（只证明签发过证书，不等于扫过） | `assets.subdomains` |
+| **子域探活** | CT 子域逐个 `GET /`（HTTPS 失败按传输层错误回退一次 HTTP），判定 `gated`（401/403 或登录墙）/ `exposed`（2xx 且主机名或标题像内部系统）/ `public` / `dead`；**只探目标或其子域**，越界只记录不发请求 | `assets.subdomains[].probed/label/non_public`、`meta.subdomains` |
 | **依赖自检** | `python -m reconone doctor` 行为级验证 httpx/anyio/ssl/dns；每次扫描把版本写进报告 | `meta.deps`、CLI 退出码 4 |
 
 **不做的事**（边界清晰）：不发送攻击载荷、不爆破口令、不做业务逻辑验证、不横向移动。主动路径**不调用任何
@@ -178,7 +178,8 @@ python -m reconone ui --host 0.0.0.0                       # 仅在你确知网�
 - `anonymous_parameterized`：**带参数**的端点**无需凭据**即可访问。没有注入身份时本次扫描本身即匿名，
   命中即算；注入了 `--cookie/--bearer` 时用**两次 GET**（认证 / 匿名）比对，只有匿名侧 2xx/3xx 才算，
   并给出响应长度与标题差异作为内容证据。
-- `live_subdomain_nonpublic`：存活子域暴露非公开面。
+- `live_subdomain_nonpublic`：**探到的**存活子域暴露非公开面（`gated` 或 `exposed`）。没探就记 `unknown`，
+  探了没暴露记 `miss`——这条判据只能把判决抬到 `worth`，不能否决。
 
 **判决规则（一次证伪驱动的修正）**：判据一是唯一能否决的判据。它明确未命中（没有带参数端点 / 全部
 不可用 / 全部被 401、403 拦住）且扫描够厚（验证跑过、未被截断）→ `not_worth`。判据二**只能升级**：
@@ -240,7 +241,7 @@ runs/<domain>/
 
 ## 4. 验收标准
 
-完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。26 条验收项由测试断言。当前全仓 **267 tests OK**（`test_pipeline` 75 / `test_concurrency` 11 / `test_web` 17 / `test_intel` 19 / `test_triage` 22 / `test_doctor` 5 / `test_redaction` 28 / `test_egress` 16 / `test_verify` 17 / `test_session` 34 / `test_cookies` 23），`python -m unittest discover -s tests -t .` 可直接复现。
+完整表格与逐条对应测试见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。27 条验收项由测试断言。当前全仓 **286 tests OK**（`test_pipeline` 75 / `test_concurrency` 11 / `test_web` 17 / `test_intel` 19 / `test_triage` 22 / `test_doctor` 5 / `test_redaction` 28 / `test_egress` 16 / `test_verify` 17 / `test_session` 34 / `test_cookies` 23 / `test_subdomains` 19），`python -m unittest discover -s tests -t .` 可直接复现。
 
 ## 5. 已知限制
 

@@ -484,11 +484,14 @@ def bet(report: dict) -> dict:
     probed_subs = [sub for sub in subs if sub.get("probed")]
     ct = ((report.get("intel") or {}).get("ct")) or {}
     ct_status = str(ct.get("status") or "")
-    if _is_ip(target.get("domain")):
+    # Observation outranks the structural default: if we actually probed hosts, that is the
+    # answer even when the target itself is an IP (a name can point at anything).
+    if probed_subs:
+        exposed = sum(1 for sub in probed_subs if sub.get("non_public"))
+        second = "hit" if exposed else "miss"
+        second_detail = (f"{len(probed_subs)} 个存活子域已探测，其中 {exposed} 个暴露非公开面")
+    elif _is_ip(target.get("domain")):
         second, second_detail = "miss", "IP 目标：没有子域维度"
-    elif probed_subs:
-        second = "hit" if any(sub.get("non_public") for sub in probed_subs) else "miss"
-        second_detail = f"{len(probed_subs)} 个存活子域已探测"
     elif subs:
         second = "unknown"
         second_detail = f"{len(subs)} 个 CT 子域尚未探测（probed:false）"
